@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/sync/transactions",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/sync/heal",
+      "schedule": "0 3 * * *"
+    }
+  ]
+}

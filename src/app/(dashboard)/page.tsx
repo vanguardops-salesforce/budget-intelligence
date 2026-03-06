@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { ConnectAccountSection } from './connect-accounts';
 
 export default async function DashboardPage() {
   const supabase = createServerSupabaseClient();
@@ -34,9 +35,12 @@ export default async function DashboardPage() {
       {/* Connection status */}
       <div className="rounded-lg border bg-white p-6">
         <h3 className="text-lg font-medium text-gray-900">Connected Accounts</h3>
+        {entities && entities.length > 0 && (
+          <ConnectAccountSection entities={entities} />
+        )}
         {(!plaidItems || plaidItems.length === 0) ? (
           <p className="mt-4 text-sm text-gray-500">
-            No accounts connected yet. Use the Plaid Link flow to connect your bank accounts.
+            No accounts connected yet. Select an entity above and connect your bank accounts.
           </p>
         ) : (
           <div className="mt-4 space-y-3">

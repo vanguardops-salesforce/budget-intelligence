@@ -3,7 +3,9 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { formatCurrency, formatRelativeTime } from '@/lib/format';
-import { PieChart, AlertTriangle, CheckCircle2, Clock } from 'lucide-react';
+import { BudgetCategoryManager } from '@/components/budget-category-manager';
+import { BudgetPageTabs } from '@/components/budget-page-tabs';
+import { PieChart, AlertTriangle, CheckCircle2, Clock, Settings } from 'lucide-react';
 
 export default async function BudgetPage() {
   const supabase = createServerSupabaseClient();
@@ -15,12 +17,14 @@ export default async function BudgetPage() {
   const dayOfMonth = now.getDate();
   const monthProgress = Math.round((dayOfMonth / daysInMonth) * 100);
 
-  // Fetch categories, transactions, and sync status in parallel
-  const [categoriesRes, transactionsRes, plaidItemsRes] = await Promise.all([
+  // Fetch categories, transactions, entities, and sync status in parallel
+  const [categoriesRes, transactionsRes, plaidItemsRes, entitiesRes] = await Promise.all([
     supabase
       .from('budget_categories')
-      .select('id, name, entity_id, monthly_budget_amount, is_active')
-      .eq('is_active', true)
+      .select(`
+        id, name, entity_id, monthly_budget_amount, is_active, created_at,
+        entities!budget_categories_entity_id_fkey(name)
+      `)
       .order('name'),
     supabase
       .from('transactions')
@@ -33,11 +37,18 @@ export default async function BudgetPage() {
       .select('last_successful_sync')
       .order('last_successful_sync', { ascending: false })
       .limit(1),
+    supabase
+      .from('entities')
+      .select('id, name, type')
+      .eq('is_active', true)
+      .order('name'),
   ]);
 
-  const categories = categoriesRes.data ?? [];
+  const allCategories = categoriesRes.data ?? [];
+  const activeCategories = allCategories.filter((c) => c.is_active);
   const transactions = transactionsRes.data ?? [];
   const lastSync = plaidItemsRes.data?.[0]?.last_successful_sync;
+  const entities = entitiesRes.data ?? [];
 
   // Build spending by category
   const spendingByCategory = new Map<string, number>();
@@ -58,7 +69,7 @@ export default async function BudgetPage() {
   }
 
   // Enrich categories with actual spending
-  const budgetRows = categories.map((cat) => {
+  const budgetRows = activeCategories.map((cat) => {
     const spent = spendingByCategory.get(cat.id) || 0;
     const budget = Number(cat.monthly_budget_amount) || 0;
     const pct = budget > 0 ? Math.min(Math.round((spent / budget) * 100), 100) : 0;
@@ -73,21 +84,19 @@ export default async function BudgetPage() {
 
   const monthName = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">Budget</h2>
-          <p className="text-muted-foreground">{monthName} — Day {dayOfMonth} of {daysInMonth}</p>
-        </div>
-        {lastSync && (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Clock className="h-3.5 w-3.5" />
-            Last synced {formatRelativeTime(lastSync)}
-          </div>
-        )}
-      </div>
+  // Prepare categories for the manager component
+  const managedCategories = allCategories.map((cat) => ({
+    id: cat.id,
+    entity_id: cat.entity_id,
+    name: cat.name,
+    monthly_budget_amount: cat.monthly_budget_amount ? Number(cat.monthly_budget_amount) : null,
+    is_active: cat.is_active,
+    entity_name: (cat.entities as unknown as { name: string } | null)?.name ?? 'Unknown',
+  }));
 
+  // Tracking tab content
+  const trackingContent = (
+    <div className="space-y-6">
       {/* Month summary cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <Card>
@@ -98,7 +107,7 @@ export default async function BudgetPage() {
           <CardContent>
             <div className="text-2xl font-bold">{formatCurrency(totalBudget)}</div>
             <p className="text-xs text-muted-foreground">
-              {categories.length} active categories
+              {activeCategories.length} active categories
             </p>
           </CardContent>
         </Card>
@@ -151,11 +160,11 @@ export default async function BudgetPage() {
       </Card>
 
       {/* Budget vs Actual */}
-      {categories.length === 0 ? (
+      {activeCategories.length === 0 ? (
         <Card>
           <CardContent className="py-8">
             <p className="text-center text-sm text-muted-foreground">
-              No budget categories configured. Run the seed SQL to create default categories.
+              No budget categories configured. Switch to the Setup tab to create categories and set monthly amounts.
             </p>
           </CardContent>
         </Card>
@@ -221,7 +230,7 @@ export default async function BudgetPage() {
                       </span>
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      Assign categories to transactions for better tracking.
+                      Assign categories to transactions or create rules for auto-categorization.
                     </p>
                   </div>
                 </>
@@ -230,6 +239,52 @@ export default async function BudgetPage() {
           </CardContent>
         </Card>
       )}
+    </div>
+  );
+
+  // Setup tab content
+  const setupContent = (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <Settings className="h-5 w-5 text-muted-foreground" />
+          <div>
+            <CardTitle>Budget Categories</CardTitle>
+            <CardDescription>
+              Define categories and set monthly budget amounts per entity.
+              Click on a budget amount in the table to edit it inline.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <BudgetCategoryManager
+          categories={managedCategories}
+          entities={entities}
+        />
+      </CardContent>
+    </Card>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">Budget</h2>
+          <p className="text-muted-foreground">{monthName} — Day {dayOfMonth} of {daysInMonth}</p>
+        </div>
+        {lastSync && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Clock className="h-3.5 w-3.5" />
+            Last synced {formatRelativeTime(lastSync)}
+          </div>
+        )}
+      </div>
+
+      <BudgetPageTabs
+        trackingContent={trackingContent}
+        setupContent={setupContent}
+      />
     </div>
   );
 }

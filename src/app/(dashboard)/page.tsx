@@ -1,5 +1,7 @@
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PlaidLink } from '@/components/plaid-link';
+import { NetWorthChart } from '@/components/net-worth-chart';
+import { CashFlowForecast } from '@/components/cash-flow-forecast';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
@@ -226,6 +228,44 @@ export default async function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Net Worth Trend & Cash Flow Forecast */}
+      {hasAccounts && (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>Net Worth Trend</CardTitle>
+              <CardDescription>
+                Daily snapshots over the last 90 days.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <NetWorthChart />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Cash Flow Forecast</CardTitle>
+              <CardDescription>
+                Projected net cash flow based on recurring patterns.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <CashFlowForecast
+                recurringPatterns={recurringPatterns.map((p) => ({
+                  estimated_amount: Number(p.estimated_amount),
+                  frequency: p.frequency,
+                  next_expected_date: p.next_expected_date,
+                }))}
+                mtdSpending={mtdSpending}
+                mtdIncome={mtdIncome}
+                dayOfMonth={now.getDate()}
+              />
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {/* Connect Bank Account */}
       <Card>

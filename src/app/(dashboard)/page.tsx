@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { PlaidLink } from '@/components/plaid-link';
 
 export default async function DashboardPage() {
   const supabase = createServerSupabaseClient();
@@ -31,12 +32,23 @@ export default async function DashboardPage() {
         <SummaryCard title="Forecast" value="--" subtitle="30-day projection" />
       </div>
 
+      {/* Connect new account */}
+      <div className="rounded-lg border bg-white p-6">
+        <h3 className="text-lg font-medium text-gray-900">Connect Bank Account</h3>
+        <p className="mt-1 text-sm text-gray-500">
+          Link your bank, credit card, or investment account via Plaid.
+        </p>
+        <div className="mt-4">
+          <PlaidLink entities={entities ?? []} />
+        </div>
+      </div>
+
       {/* Connection status */}
       <div className="rounded-lg border bg-white p-6">
         <h3 className="text-lg font-medium text-gray-900">Connected Accounts</h3>
         {(!plaidItems || plaidItems.length === 0) ? (
           <p className="mt-4 text-sm text-gray-500">
-            No accounts connected yet. Use the Plaid Link flow to connect your bank accounts.
+            No accounts connected yet. Use the form above to connect your bank accounts.
           </p>
         ) : (
           <div className="mt-4 space-y-3">
@@ -55,6 +67,30 @@ export default async function DashboardPage() {
                 <StatusBadge status={item.status} />
               </div>
             ))}
+
+            {/* Show linked accounts under their items */}
+            {accounts && accounts.length > 0 && (
+              <div className="mt-4 border-t pt-4">
+                <h4 className="text-sm font-medium text-gray-700">Accounts</h4>
+                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {accounts.map((acct) => (
+                    <div key={acct.id} className="flex items-center justify-between rounded-md border p-2.5">
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">{acct.name}</p>
+                        <p className="text-xs text-gray-500">
+                          {acct.type}{acct.mask ? ` ····${acct.mask}` : ''}
+                        </p>
+                      </div>
+                      <p className="text-sm font-semibold text-gray-900">
+                        {acct.current_balance != null
+                          ? `$${Number(acct.current_balance).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+                          : '--'}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

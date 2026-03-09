@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
+import { CountryCode, Products } from 'plaid';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { requireMFA } from '@/lib/supabase/auth-config';
+import { getPlaidClient } from '@/lib/plaid/client';
 import { toClientError } from '@/lib/errors';
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit';
 import { getClientIP, writeAuditLog } from '@/lib/audit';
+import { publicEnv } from '@/lib/env';
 import { logger } from '@/lib/logger';
 
 export async function POST(request: Request) {
@@ -29,8 +32,47 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Too many requests.' }, { status: 429 });
     }
 
-    // Phase 2: Implement Plaid Link token creation
-    return NextResponse.json({ error: 'Not yet implemented.' }, { status: 501 });
+    // Parse optional entity_id from the request body
+    let entityId: string | undefined;
+    try {
+      const body = await request.json();
+      entityId = body.entity_id;
+    } catch {
+      // No body or invalid JSON — entity_id is optional
+    }
+
+    // If entity_id provided, verify the user owns it
+    if (entityId) {
+      const { data: entity, error: entityError } = await supabase
+        .from('entities')
+        .select('id')
+        .eq('id', entityId)
+        .eq('is_active', true)
+        .single();
+
+      if (entityError || !entity) {
+        return NextResponse.json({ error: 'Invalid entity.' }, { status: 400 });
+      }
+    }
+
+    const plaidClient = getPlaidClient();
+    const webhookUrl = `${publicEnv.NEXT_PUBLIC_APP_URL}/api/plaid/webhook`;
+
+    const response = await plaidClient.linkTokenCreate({
+      user: { client_user_id: user.id },
+      client_name: 'Budget Intelligence',
+      products: [Products.Transactions],
+      country_codes: [CountryCode.Us],
+      language: 'en',
+      webhook: webhookUrl,
+    });
+
+    logger.info('Link token created', { user_id: user.id });
+
+    return NextResponse.json({
+      link_token: response.data.link_token,
+      expiration: response.data.expiration,
+    });
   } catch (error) {
     logger.error('create-link-token error', { error_message: String(error) });
     const clientError = toClientError(error);

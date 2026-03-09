@@ -10,7 +10,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { formatCurrency } from '@/lib/format';
+import { formatCurrency, formatRelativeTime } from '@/lib/format';
 import { TrendingUp, TrendingDown, BarChart3, Layers, Clock } from 'lucide-react';
 
 export default async function PortfolioPage() {
@@ -53,12 +53,20 @@ export default async function PortfolioPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight">Portfolio</h2>
-        <p className="text-muted-foreground">
-          Investment positions from linked brokerage accounts.
-          <span className="ml-2 text-xs text-muted-foreground/70">READ-ONLY — No trade execution.</span>
-        </p>
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">Portfolio</h2>
+          <p className="text-muted-foreground">
+            Investment positions from linked brokerage accounts.
+            <span className="ml-2 text-xs text-muted-foreground/70">READ-ONLY — No trade execution.</span>
+          </p>
+        </div>
+        {lastSync && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Clock className="h-3.5 w-3.5" />
+            Last synced {formatRelativeTime(lastSync)}
+          </div>
+        )}
       </div>
 
       {/* Summary Cards */}

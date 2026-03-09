@@ -2,8 +2,8 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
-import { formatCurrency } from '@/lib/format';
-import { PieChart, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { formatCurrency, formatRelativeTime } from '@/lib/format';
+import { PieChart, AlertTriangle, CheckCircle2, Clock } from 'lucide-react';
 
 export default async function BudgetPage() {
   const supabase = createServerSupabaseClient();
@@ -15,8 +15,8 @@ export default async function BudgetPage() {
   const dayOfMonth = now.getDate();
   const monthProgress = Math.round((dayOfMonth / daysInMonth) * 100);
 
-  // Fetch categories and transactions in parallel
-  const [categoriesRes, transactionsRes] = await Promise.all([
+  // Fetch categories, transactions, and sync status in parallel
+  const [categoriesRes, transactionsRes, plaidItemsRes] = await Promise.all([
     supabase
       .from('budget_categories')
       .select('id, name, entity_id, monthly_budget_amount, is_active')
@@ -28,10 +28,16 @@ export default async function BudgetPage() {
       .is('deleted_at', null)
       .gte('date', monthStart)
       .lte('date', today),
+    supabase
+      .from('plaid_items')
+      .select('last_successful_sync')
+      .order('last_successful_sync', { ascending: false })
+      .limit(1),
   ]);
 
   const categories = categoriesRes.data ?? [];
   const transactions = transactionsRes.data ?? [];
+  const lastSync = plaidItemsRes.data?.[0]?.last_successful_sync;
 
   // Build spending by category
   const spendingByCategory = new Map<string, number>();
@@ -69,9 +75,17 @@ export default async function BudgetPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight">Budget</h2>
-        <p className="text-muted-foreground">{monthName} — Day {dayOfMonth} of {daysInMonth}</p>
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">Budget</h2>
+          <p className="text-muted-foreground">{monthName} — Day {dayOfMonth} of {daysInMonth}</p>
+        </div>
+        {lastSync && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Clock className="h-3.5 w-3.5" />
+            Last synced {formatRelativeTime(lastSync)}
+          </div>
+        )}
       </div>
 
       {/* Month summary cards */}

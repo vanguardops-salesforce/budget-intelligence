@@ -1,19 +1,19 @@
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { TransactionTable } from '@/components/transaction-table';
-import { formatCurrency } from '@/lib/format';
-import { Receipt, ArrowDownLeft, ArrowUpRight } from 'lucide-react';
+import { formatCurrency, formatRelativeTime } from '@/lib/format';
+import { Receipt, ArrowDownLeft, ArrowUpRight, Clock } from 'lucide-react';
 
 export default async function TransactionsPage() {
   const supabase = createServerSupabaseClient();
 
-  const [transactionsRes, accountsRes, categoriesRes] = await Promise.all([
+  const [transactionsRes, accountsRes, categoriesRes, plaidItemsRes] = await Promise.all([
     supabase
       .from('transactions')
       .select('id, amount, date, merchant_name, plaid_category, user_category_id, is_recurring, account_id')
       .is('deleted_at', null)
       .order('date', { ascending: false })
-      .limit(200),
+      .limit(500),
     supabase
       .from('accounts')
       .select('id, name, mask, type')
@@ -24,11 +24,17 @@ export default async function TransactionsPage() {
       .select('id, name')
       .eq('is_active', true)
       .order('name'),
+    supabase
+      .from('plaid_items')
+      .select('last_successful_sync')
+      .order('last_successful_sync', { ascending: false })
+      .limit(1),
   ]);
 
   const transactions = transactionsRes.data ?? [];
   const accounts = accountsRes.data ?? [];
   const categories = categoriesRes.data ?? [];
+  const lastSync = plaidItemsRes.data?.[0]?.last_successful_sync;
 
   const totalSpending = transactions
     .filter((t) => Number(t.amount) > 0)
@@ -40,11 +46,19 @@ export default async function TransactionsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight">Transactions</h2>
-        <p className="text-muted-foreground">
-          Recent transactions across all linked accounts.
-        </p>
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">Transactions</h2>
+          <p className="text-muted-foreground">
+            Recent transactions across all linked accounts.
+          </p>
+        </div>
+        {lastSync && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Clock className="h-3.5 w-3.5" />
+            Last synced {formatRelativeTime(lastSync)}
+          </div>
+        )}
       </div>
 
       {/* Quick stats */}
@@ -56,7 +70,7 @@ export default async function TransactionsPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{transactions.length}</div>
-            <p className="text-xs text-muted-foreground">Showing up to 200 most recent</p>
+            <p className="text-xs text-muted-foreground">Showing up to 500 most recent</p>
           </CardContent>
         </Card>
 
@@ -83,7 +97,7 @@ export default async function TransactionsPage() {
         </Card>
       </div>
 
-      {/* Transaction table with search and category override */}
+      {/* Transaction table with search, sort, pagination, and category override */}
       <Card>
         <CardHeader>
           <CardTitle>All Transactions</CardTitle>

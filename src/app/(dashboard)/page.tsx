@@ -13,6 +13,8 @@ import {
   CreditCard,
   CircleDot,
   AlertTriangle,
+  CalendarClock,
+  Clock,
 } from 'lucide-react';
 
 export default async function DashboardPage() {
@@ -23,7 +25,7 @@ export default async function DashboardPage() {
   const today = now.toISOString().split('T')[0];
 
   // Parallel data fetching
-  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes] = await Promise.all([
+  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes] = await Promise.all([
     supabase.from('entities').select('id, name, type').eq('is_active', true),
     supabase
       .from('accounts')
@@ -43,6 +45,10 @@ export default async function DashboardPage() {
       .from('holdings')
       .select('value')
       .is('deleted_at', null),
+    supabase
+      .from('recurring_patterns')
+      .select('estimated_amount, frequency, next_expected_date')
+      .eq('is_active', true),
   ]);
 
   const entities = entitiesRes.data ?? [];
@@ -50,6 +56,7 @@ export default async function DashboardPage() {
   const plaidItems = plaidItemsRes.data ?? [];
   const transactions = txRes.data ?? [];
   const holdings = holdingsRes.data ?? [];
+  const recurringPatterns = recurringRes.data ?? [];
 
   // Compute metrics
   const totalCash = accounts
@@ -76,7 +83,38 @@ export default async function DashboardPage() {
     .filter((t) => Number(t.amount) < 0)
     .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
 
+  // 30-day cash flow forecast based on recurring patterns
+  const forecastDate = new Date(now.getTime() + 30 * 86_400_000);
+  let forecast30d = 0;
+  for (const pattern of recurringPatterns) {
+    const amt = Number(pattern.estimated_amount) || 0;
+    const next = pattern.next_expected_date ? new Date(pattern.next_expected_date) : null;
+    if (!next || next > forecastDate) continue;
+
+    const freqMultiplier: Record<string, number> = {
+      weekly: 4,
+      biweekly: 2,
+      monthly: 1,
+      annual: 0,
+    };
+    const occurrences = freqMultiplier[pattern.frequency] ?? 1;
+    forecast30d += amt * occurrences;
+  }
+  // If no recurring patterns, estimate from MTD pace
+  if (recurringPatterns.length === 0 && mtdSpending > 0) {
+    const dayOfMonth = now.getDate();
+    const dailyRate = mtdSpending / dayOfMonth;
+    forecast30d = dailyRate * 30;
+  }
+
   const hasAccounts = accounts.length > 0;
+
+  // Latest sync timestamp across all institutions
+  const latestSync = plaidItems
+    .map((i) => i.last_successful_sync)
+    .filter(Boolean)
+    .sort()
+    .pop();
 
   const accountTypeIcon: Record<string, typeof Landmark> = {
     depository: Landmark,
@@ -88,15 +126,23 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight">Overview</h2>
-        <p className="text-muted-foreground">
-          Your financial snapshot at a glance.
-        </p>
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">Overview</h2>
+          <p className="text-muted-foreground">
+            Your financial snapshot at a glance.
+          </p>
+        </div>
+        {latestSync && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Clock className="h-3.5 w-3.5" />
+            Last synced {formatRelativeTime(latestSync)}
+          </div>
+        )}
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Net Worth</CardTitle>
@@ -133,6 +179,21 @@ export default async function DashboardPage() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">MTD Income</CardTitle>
+            <TrendingUp className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-green-600">
+              {hasAccounts ? formatCurrency(mtdIncome) : '--'}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {hasAccounts ? `Since ${monthStart}` : 'This month'}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">MTD Spending</CardTitle>
             <TrendingDown className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
@@ -148,15 +209,19 @@ export default async function DashboardPage() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">MTD Income</CardTitle>
-            <TrendingUp className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">30-Day Forecast</CardTitle>
+            <CalendarClock className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-green-600">
-              {hasAccounts ? formatCurrency(mtdIncome) : '--'}
+            <div className="text-2xl font-bold">
+              {hasAccounts ? formatCurrency(forecast30d) : '--'}
             </div>
             <p className="text-xs text-muted-foreground">
-              {hasAccounts ? `Since ${monthStart}` : 'This month'}
+              {recurringPatterns.length > 0
+                ? `Based on ${recurringPatterns.length} recurring pattern(s)`
+                : hasAccounts
+                ? 'Projected from MTD pace'
+                : 'Estimated outflow'}
             </p>
           </CardContent>
         </Card>
@@ -193,7 +258,7 @@ export default async function DashboardPage() {
           ) : (
             <div className="space-y-4">
               {plaidItems.map((item) => (
-                <div key={item.id} className="flex items-center justify-between rounded-lg border p-4">
+                <div key={item.id} className="flex flex-col gap-2 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
                       <p className="text-sm font-medium leading-none">
@@ -226,7 +291,7 @@ export default async function DashboardPage() {
                     const Icon = accountTypeIcon[acct.type] ?? CircleDot;
                     return (
                       <div key={acct.id} className="flex items-center gap-3 rounded-lg border p-3">
-                        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-muted">
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted">
                           <Icon className="h-4 w-4 text-muted-foreground" />
                         </div>
                         <div className="flex-1 min-w-0">
@@ -236,7 +301,7 @@ export default async function DashboardPage() {
                             {maskAccount(acct.mask, '')}
                           </p>
                         </div>
-                        <p className="text-sm font-semibold tabular-nums">
+                        <p className="text-sm font-semibold tabular-nums whitespace-nowrap">
                           {acct.current_balance != null
                             ? formatCurrency(Number(acct.current_balance))
                             : '--'}
@@ -259,7 +324,7 @@ export default async function DashboardPage() {
             <CardDescription>Business and personal entities.</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {entities.map((entity) => (
                 <div key={entity.id} className="rounded-lg border p-4">
                   <p className="font-medium">{entity.name}</p>

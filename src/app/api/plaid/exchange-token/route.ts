@@ -1,12 +1,21 @@
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createServerSupabaseClient, createServiceRoleClient } from '@/lib/supabase/server';
 import { requireMFA } from '@/lib/supabase/auth-config';
 import { getPlaidClient } from '@/lib/plaid/client';
 import { encrypt } from '@/lib/crypto';
-import { toClientError } from '@/lib/errors';
+import { toClientError, ValidationError } from '@/lib/errors';
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit';
 import { getClientIP, writeAuditLog } from '@/lib/audit';
 import { logger } from '@/lib/logger';
+
+const exchangeTokenSchema = z.object({
+  public_token: z.string().min(1),
+  entity_id: z.string().uuid(),
+  institution: z.object({
+    name: z.string().optional(),
+  }).optional(),
+});
 
 export async function POST(request: Request) {
   try {
@@ -26,15 +35,12 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
-    const { public_token, entity_id, institution } = body;
-
-    if (!public_token || typeof public_token !== 'string') {
-      return NextResponse.json({ error: 'Missing public_token.' }, { status: 400 });
+    const parsed = exchangeTokenSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new ValidationError('Invalid request body');
     }
 
-    if (!entity_id || typeof entity_id !== 'string') {
-      return NextResponse.json({ error: 'Missing entity_id.' }, { status: 400 });
-    }
+    const { public_token, entity_id, institution } = parsed.data;
 
     // Verify entity ownership (RLS enforces user_id match)
     const { data: entity, error: entityError } = await supabase

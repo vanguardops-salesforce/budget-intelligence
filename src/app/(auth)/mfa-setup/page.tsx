@@ -70,6 +70,12 @@ export default function MFASetupPage() {
         return;
       }
 
+      fetch('/api/auth/audit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'AUTH_MFA_ENROLLED' }),
+      }).catch(() => {});
+
       // MFA enrolled and verified — redirect to dashboard
       router.push('/');
     } catch {

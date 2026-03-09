@@ -1,72 +1,104 @@
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { TransactionTable } from '@/components/transaction-table';
+import { formatCurrency } from '@/lib/format';
+import { Receipt, ArrowDownLeft, ArrowUpRight } from 'lucide-react';
 
 export default async function TransactionsPage() {
   const supabase = createServerSupabaseClient();
 
-  const { data: transactions } = await supabase
-    .from('transactions')
-    .select('id, amount, date, merchant_name, plaid_category, is_recurring')
-    .is('deleted_at', null)
-    .order('date', { ascending: false })
-    .limit(50);
+  const [transactionsRes, accountsRes, categoriesRes] = await Promise.all([
+    supabase
+      .from('transactions')
+      .select('id, amount, date, merchant_name, plaid_category, user_category_id, is_recurring, account_id')
+      .is('deleted_at', null)
+      .order('date', { ascending: false })
+      .limit(200),
+    supabase
+      .from('accounts')
+      .select('id, name, mask, type')
+      .eq('is_active', true)
+      .is('deleted_at', null),
+    supabase
+      .from('budget_categories')
+      .select('id, name')
+      .eq('is_active', true)
+      .order('name'),
+  ]);
+
+  const transactions = transactionsRes.data ?? [];
+  const accounts = accountsRes.data ?? [];
+  const categories = categoriesRes.data ?? [];
+
+  const totalSpending = transactions
+    .filter((t) => Number(t.amount) > 0)
+    .reduce((sum, t) => sum + Number(t.amount), 0);
+
+  const totalIncome = transactions
+    .filter((t) => Number(t.amount) < 0)
+    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-semibold text-gray-900">Transactions</h2>
-
-      <div className="rounded-lg border bg-white">
-        {/* Search bar - Phase 3 will make interactive */}
-        <div className="border-b px-6 py-4">
-          <input
-            type="text"
-            placeholder="Search transactions..."
-            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            disabled
-          />
-        </div>
-
-        {(!transactions || transactions.length === 0) ? (
-          <div className="p-6">
-            <p className="text-sm text-gray-500">
-              No transactions yet. Connect a bank account via Plaid to start syncing.
-            </p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="border-b bg-gray-50 text-xs font-medium uppercase text-gray-500">
-                <tr>
-                  <th className="px-6 py-3">Date</th>
-                  <th className="px-6 py-3">Merchant</th>
-                  <th className="px-6 py-3">Category</th>
-                  <th className="px-6 py-3 text-right">Amount</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {transactions.map((tx) => (
-                  <tr key={tx.id} className="hover:bg-gray-50">
-                    <td className="whitespace-nowrap px-6 py-3 text-gray-500">{tx.date}</td>
-                    <td className="px-6 py-3 font-medium text-gray-900">
-                      {tx.merchant_name ?? 'Unknown'}
-                      {tx.is_recurring && (
-                        <span className="ml-2 rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-600">
-                          recurring
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-6 py-3 text-gray-500">
-                      {Array.isArray(tx.plaid_category) ? tx.plaid_category.join(' > ') : '—'}
-                    </td>
-                    <td className={`whitespace-nowrap px-6 py-3 text-right font-medium ${tx.amount < 0 ? 'text-green-600' : 'text-gray-900'}`}>
-                      ${Math.abs(tx.amount).toFixed(2)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+      <div>
+        <h2 className="text-2xl font-bold tracking-tight">Transactions</h2>
+        <p className="text-muted-foreground">
+          Recent transactions across all linked accounts.
+        </p>
       </div>
+
+      {/* Quick stats */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Total Transactions</CardTitle>
+            <Receipt className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{transactions.length}</div>
+            <p className="text-xs text-muted-foreground">Showing up to 200 most recent</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Money Out</CardTitle>
+            <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{formatCurrency(totalSpending)}</div>
+            <p className="text-xs text-muted-foreground">Debits in visible range</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Money In</CardTitle>
+            <ArrowDownLeft className="h-4 w-4 text-green-600" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-green-600">{formatCurrency(totalIncome)}</div>
+            <p className="text-xs text-muted-foreground">Credits in visible range</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Transaction table with search and category override */}
+      <Card>
+        <CardHeader>
+          <CardTitle>All Transactions</CardTitle>
+          <CardDescription>
+            Search, sort, and override categories. Changes are saved immediately.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <TransactionTable
+            transactions={transactions}
+            accounts={accounts}
+            categories={categories}
+          />
+        </CardContent>
+      </Card>
     </div>
   );
 }

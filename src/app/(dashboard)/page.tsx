@@ -2,6 +2,8 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PlaidLink } from '@/components/plaid-link';
 import { NetWorthChart } from '@/components/net-worth-chart';
 import { CashFlowForecast } from '@/components/cash-flow-forecast';
+import { ConnectionHealth } from '@/components/connection-health';
+import { AccountEntityAssignment } from '@/components/account-entity-assignment';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
@@ -31,12 +33,12 @@ export default async function DashboardPage() {
     supabase.from('entities').select('id, name, type').eq('is_active', true),
     supabase
       .from('accounts')
-      .select('id, name, type, subtype, current_balance, available_balance, mask, is_active, plaid_item_id')
+      .select('id, name, type, subtype, current_balance, available_balance, mask, is_active, plaid_item_id, entity_id')
       .eq('is_active', true)
       .is('deleted_at', null),
     supabase
       .from('plaid_items')
-      .select('id, institution_name, status, last_successful_sync, error_count, last_error_code'),
+      .select('id, institution_name, status, last_successful_sync, error_count, last_error_code, consent_expiration'),
     supabase
       .from('transactions')
       .select('amount')
@@ -280,52 +282,49 @@ export default async function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* Connected Institutions */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Connected Institutions</CardTitle>
-          <CardDescription>
-            {plaidItems.length === 0
-              ? 'No accounts connected yet.'
-              : `${plaidItems.length} institution(s) linked`}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {plaidItems.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              Use the form above to connect your bank accounts.
-            </p>
-          ) : (
+      {/* Connection Health */}
+      {plaidItems.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Connection Health</CardTitle>
+            <CardDescription>
+              Plaid connection status, sync activity, and re-authentication.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ConnectionHealth plaidItems={plaidItems} />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Accounts & Entity Assignment */}
+      {accounts.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Linked Accounts</CardTitle>
+            <CardDescription>
+              Assign each account to an entity (Personal, Veteran Digital, VCG, etc.)
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
             <div className="space-y-4">
-              {plaidItems.map((item) => (
-                <div key={item.id} className="flex flex-col gap-2 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium leading-none">
-                        {item.institution_name ?? 'Unknown Institution'}
-                      </p>
-                      <ConnectionBadge status={item.status} />
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Last synced:{' '}
-                      {item.last_successful_sync
-                        ? formatRelativeTime(item.last_successful_sync)
-                        : 'Never'}
-                    </p>
-                    {item.last_error_code && (
-                      <p className="text-xs text-destructive">
-                        Error: {item.last_error_code} (retries: {item.error_count})
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ))}
+              {/* Account entity assignment */}
+              <AccountEntityAssignment
+                accounts={accounts.map((a) => ({
+                  id: a.id,
+                  name: a.name,
+                  mask: a.mask,
+                  type: a.type,
+                  entity_id: a.entity_id,
+                }))}
+                entities={entities}
+              />
 
               <Separator />
 
-              {/* Accounts under institutions */}
+              {/* Account balances */}
               <div>
-                <h4 className="mb-3 text-sm font-medium">Accounts</h4>
+                <h4 className="mb-3 text-sm font-medium">Account Balances</h4>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   {accounts.map((acct) => {
                     const Icon = accountTypeIcon[acct.type] ?? CircleDot;
@@ -352,9 +351,9 @@ export default async function DashboardPage() {
                 </div>
               </div>
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Entities */}
       {entities.length > 0 && (
@@ -381,15 +380,3 @@ export default async function DashboardPage() {
   );
 }
 
-function ConnectionBadge({ status }: { status: string }) {
-  const config: Record<string, { variant: 'success' | 'warning' | 'danger' | 'secondary'; label: string }> = {
-    connected: { variant: 'success', label: 'Connected' },
-    degraded: { variant: 'warning', label: 'Degraded' },
-    disconnected: { variant: 'danger', label: 'Disconnected' },
-    reauth_required: { variant: 'warning', label: 'Reauth Required' },
-  };
-
-  const { variant, label } = config[status] ?? { variant: 'secondary' as const, label: status };
-
-  return <Badge variant={variant}>{label}</Badge>;
-}

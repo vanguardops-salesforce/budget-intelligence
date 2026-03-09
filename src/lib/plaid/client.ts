@@ -1,17 +1,21 @@
 import { Configuration, PlaidApi, PlaidEnvironments } from 'plaid';
 import { getSecrets } from '../env';
+import { logger } from '../logger';
 
 let _plaidClient: PlaidApi | null = null;
 
 /**
  * Singleton Plaid API client. Server-only.
- * Uses sandbox by default — set PLAID_ENV=development or production when ready.
+ * Reads PLAID_ENV from validated environment secrets.
+ * Valid values: "sandbox", "development", "production".
  */
 export function getPlaidClient(): PlaidApi {
   if (_plaidClient) return _plaidClient;
 
   const secrets = getSecrets();
-  const env = process.env.PLAID_ENV || 'sandbox';
+  const env = secrets.PLAID_ENV;
+
+  logger.info('Initializing Plaid client', { plaid_env: env });
 
   const configuration = new Configuration({
     basePath: PlaidEnvironments[env],

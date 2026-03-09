@@ -4,6 +4,7 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { requireMFA } from '@/lib/supabase/auth-config';
 import { toClientError, ValidationError } from '@/lib/errors';
 import { logger } from '@/lib/logger';
+import { fetchFundamentals } from '@/lib/market/fmp';
 
 const querySchema = z.object({
   ticker: z.string().min(1).max(10).regex(/^[A-Z0-9.]+$/),
@@ -26,8 +27,9 @@ export async function GET(request: Request) {
       throw new ValidationError('Invalid ticker symbol');
     }
 
-    // Phase 5: Fetch from FMP API
-    return NextResponse.json({ error: 'Not yet implemented.' }, { status: 501 });
+    const data = await fetchFundamentals(parsed.data.ticker);
+
+    return NextResponse.json(data);
   } catch (error) {
     logger.error('Market fundamentals error', { error_message: String(error) });
     const clientError = toClientError(error);

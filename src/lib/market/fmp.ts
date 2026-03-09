@@ -1,98 +1,125 @@
+/**
+ * Financial Modeling Prep (FMP) API client.
+ * Used for educational market data queries only.
+ * Free tier: 250 req/day — we cache aggressively.
+ */
+
 import { getSecrets } from '../env';
 import { logger } from '../logger';
 
-const FMP_BASE_URL = 'https://financialmodelingprep.com/api/v3';
+const FMP_BASE = 'https://financialmodelingprep.com/api/v3';
 
-/**
- * Simple daily request counter. Resets on cold start (acceptable for personal app).
- * FMP free tier: 250 req/day.
- */
-let dailyRequests = 0;
-let lastResetDate = new Date().toDateString();
-
-function checkDailyLimit(): boolean {
-  const today = new Date().toDateString();
-  if (today !== lastResetDate) {
-    dailyRequests = 0;
-    lastResetDate = today;
-  }
-  return dailyRequests < 200; // Leave buffer under 250 limit
-}
-
-interface FMPQuote {
-  symbol: string;
-  name: string;
-  price: number;
-  change: number;
-  changesPercentage: number;
-  dayHigh: number;
-  dayLow: number;
-  marketCap: number;
-  volume: number;
-  pe: number | null;
-  eps: number | null;
-}
-
-interface FMPProfile {
-  symbol: string;
-  companyName: string;
+export interface FundamentalsData {
+  ticker: string;
+  company_name: string;
   sector: string;
   industry: string;
   description: string;
-  marketCap: number;
-  beta: number;
-  price: number;
+  market_cap: number | null;
+  pe_ratio: number | null;
+  eps: number | null;
+  dividend_yield: number | null;
+  fifty_two_week_high: number | null;
+  fifty_two_week_low: number | null;
+  price: number | null;
+  beta: number | null;
+  disclaimer: string;
+}
+
+// In-memory cache: ticker -> { data, fetchedAt }
+const cache = new Map<string, { data: FundamentalsData; fetchedAt: number }>();
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// Daily request counter (resets on cold start, which is acceptable for single-user)
+let dailyRequests = 0;
+let dailyResetDate = new Date().toISOString().split('T')[0];
+const DAILY_LIMIT = 200; // Conservative buffer under 250
+
+function checkDailyLimit() {
+  const today = new Date().toISOString().split('T')[0];
+  if (today !== dailyResetDate) {
+    dailyRequests = 0;
+    dailyResetDate = today;
+  }
+  if (dailyRequests >= DAILY_LIMIT) {
+    throw new Error('FMP daily request limit reached. Try again tomorrow.');
+  }
 }
 
 /**
- * Fetch a stock quote for educational context.
- * Returns null on failure (non-critical for AI responses).
+ * Fetch fundamental data for a ticker. Returns educational context only.
  */
-export async function getQuote(symbol: string): Promise<FMPQuote | null> {
-  return fetchFMP<FMPQuote[]>(`/quote/${encodeURIComponent(symbol)}`)
-    .then((data) => data?.[0] ?? null);
-}
+export async function fetchFundamentals(ticker: string): Promise<FundamentalsData> {
+  const normalizedTicker = ticker.toUpperCase().replace(/[^A-Z0-9.]/g, '');
 
-/**
- * Fetch company profile for educational context.
- */
-export async function getCompanyProfile(symbol: string): Promise<FMPProfile | null> {
-  return fetchFMP<FMPProfile[]>(`/profile/${encodeURIComponent(symbol)}`)
-    .then((data) => data?.[0] ?? null);
-}
-
-/**
- * Fetch key financial ratios for educational comparison.
- */
-export async function getKeyMetrics(symbol: string): Promise<Record<string, unknown> | null> {
-  return fetchFMP<Record<string, unknown>[]>(`/key-metrics-ttm/${encodeURIComponent(symbol)}`)
-    .then((data) => data?.[0] ?? null);
-}
-
-async function fetchFMP<T>(path: string): Promise<T | null> {
-  if (!checkDailyLimit()) {
-    logger.warn('FMP daily rate limit approaching', { daily_requests: dailyRequests });
-    return null;
+  // Check cache
+  const cached = cache.get(normalizedTicker);
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    return cached.data;
   }
 
-  try {
-    const secrets = getSecrets();
-    const url = `${FMP_BASE_URL}${path}?apikey=${secrets.FMP_API_KEY}`;
+  checkDailyLimit();
 
-    const res = await fetch(url, {
-      next: { revalidate: 300 }, // Cache for 5 minutes (Next.js extended fetch)
-    } as RequestInit);
+  const secrets = getSecrets();
+  const url = `${FMP_BASE}/profile/${encodeURIComponent(normalizedTicker)}?apikey=${secrets.FMP_API_KEY}`;
 
-    dailyRequests++;
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(10_000),
+  });
 
-    if (!res.ok) {
-      logger.warn('FMP request failed', { path, status: res.status });
-      return null;
-    }
-
-    return (await res.json()) as T;
-  } catch (error) {
-    logger.error('FMP fetch error', { path, error_message: String(error) });
-    return null;
+  if (!response.ok) {
+    logger.error('FMP API error', {
+      status: response.status,
+      ticker: normalizedTicker,
+    });
+    throw new Error(`FMP API returned ${response.status}`);
   }
+
+  dailyRequests++;
+
+  const profiles = (await response.json()) as Array<Record<string, unknown>>;
+
+  if (!profiles || profiles.length === 0) {
+    throw new Error(`No data found for ticker ${normalizedTicker}`);
+  }
+
+  const p = profiles[0];
+
+  const data: FundamentalsData = {
+    ticker: normalizedTicker,
+    company_name: String(p.companyName ?? ''),
+    sector: String(p.sector ?? ''),
+    industry: String(p.industry ?? ''),
+    description: truncate(String(p.description ?? ''), 300),
+    market_cap: toNum(p.mktCap),
+    pe_ratio: toNum(p.pe ?? p.peRatio),
+    eps: toNum(p.eps),
+    dividend_yield: toNum(p.lastDiv),
+    fifty_two_week_high: toNum(p.range ? String(p.range).split('-')[1] : null),
+    fifty_two_week_low: toNum(p.range ? String(p.range).split('-')[0] : null),
+    price: toNum(p.price),
+    beta: toNum(p.beta),
+    disclaimer:
+      'This data is for educational purposes only. It does not constitute investment advice or a recommendation to buy or sell any security.',
+  };
+
+  cache.set(normalizedTicker, { data, fetchedAt: Date.now() });
+
+  logger.info('FMP fundamentals fetched', {
+    ticker: normalizedTicker,
+    daily_requests: dailyRequests,
+  });
+
+  return data;
+}
+
+function toNum(val: unknown): number | null {
+  if (val === null || val === undefined || val === '') return null;
+  const n = Number(val);
+  return isNaN(n) ? null : n;
+}
+
+function truncate(str: string, maxLen: number): string {
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen - 3) + '...';
 }

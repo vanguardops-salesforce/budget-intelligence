@@ -1,47 +1,30 @@
+/**
+ * AI function-calling schema definitions and implementations.
+ * These are the 5 tools the AI coach can invoke to query user data.
+ */
+
 import type OpenAI from 'openai';
-import { type SupabaseClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { computeFinancialState } from './financial-intelligence';
-import { getQuote, getCompanyProfile, getKeyMetrics } from '../market/fmp';
+import { fetchFundamentals } from '../market/fmp';
 import { logger } from '../logger';
 
-// Row types for Supabase query results (avoids implicit any)
-interface TxRow {
-  date: string;
-  merchant_name: string | null;
-  amount: number;
-  plaid_category: string[] | null;
-  is_recurring: boolean;
-  user_category_id?: string | null;
-}
-
-interface BudgetCatRow {
-  id: string;
-  entity_id: string;
-  name: string;
-  monthly_budget_amount: number | null;
-}
-
-interface HoldingRow {
-  security_name: string;
-  ticker: string | null;
-  quantity: number;
-  price: number;
-  value: number;
-  cost_basis: number | null;
-}
-
 // ---------------------------------------------------------------------------
-// Function-calling tool definitions for OpenAI
+// OpenAI Function Schemas
 // ---------------------------------------------------------------------------
 
-export const AI_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+export const AI_FUNCTIONS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
       name: 'get_financial_state',
       description:
-        'Get the user\'s current financial snapshot: net worth, cash, income, spending, budget variance, portfolio allocation, cash flow forecast, and alerts. Call this before answering any financial question.',
-      parameters: { type: 'object', properties: {}, required: [] },
+        'Get the user\'s current financial snapshot: net worth, cash balances, MTD income/spending, budget variance, portfolio allocation, cash flow forecast, and alerts. Call this before answering any financial question.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
     },
   },
   {
@@ -49,21 +32,33 @@ export const AI_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'get_transactions',
       description:
-        'Get recent transactions, optionally filtered by entity or date range. Returns the last 50 transactions by default.',
+        'Query the user\'s transactions with optional filters. Use when the user asks about specific spending, merchants, categories, or date ranges.',
       parameters: {
         type: 'object',
         properties: {
           entity_name: {
             type: 'string',
-            description: 'Filter by entity name (e.g., "Personal", "My LLC")',
+            description: 'Filter by entity name (e.g., "Personal", "My LLC"). Omit for all entities.',
           },
-          days: {
-            type: 'number',
-            description: 'Number of days to look back (default 30, max 90)',
+          date_from: {
+            type: 'string',
+            description: 'Start date in YYYY-MM-DD format. Defaults to start of current month.',
+          },
+          date_to: {
+            type: 'string',
+            description: 'End date in YYYY-MM-DD format. Defaults to today.',
+          },
+          merchant: {
+            type: 'string',
+            description: 'Filter by merchant name (partial match, case-insensitive).',
           },
           category: {
             type: 'string',
-            description: 'Filter by budget category name',
+            description: 'Filter by budget category name (partial match, case-insensitive).',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of transactions to return. Default 25, max 50.',
           },
         },
         required: [],
@@ -75,13 +70,13 @@ export const AI_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'get_budget_status',
       description:
-        'Get month-to-date budget status across all categories: budgeted amount, actual spending, remaining, and percentage used.',
+        'Get budget category status showing monthly limits, actual spending, and variance for each category. Use when discussing budget adherence.',
       parameters: {
         type: 'object',
         properties: {
           entity_name: {
             type: 'string',
-            description: 'Filter by entity name',
+            description: 'Filter by entity name. Omit for all entities.',
           },
         },
         required: [],
@@ -93,13 +88,13 @@ export const AI_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'get_holdings_detail',
       description:
-        'Get investment holdings with current value, cost basis, and gain/loss for educational portfolio discussion.',
+        'Get detailed investment holdings: security name, ticker, quantity, current value, cost basis, and gain/loss. Use when discussing portfolio or investments.',
       parameters: {
         type: 'object',
         properties: {
           entity_name: {
             type: 'string',
-            description: 'Filter by entity name',
+            description: 'Filter by entity name. Omit for all entities.',
           },
         },
         required: [],
@@ -111,70 +106,59 @@ export const AI_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'get_market_fundamentals',
       description:
-        'Get educational market data for a stock ticker: price, P/E, market cap, sector, key metrics. For educational context only.',
+        'Fetch educational market fundamentals for a specific ticker (P/E ratio, market cap, sector, description). ONLY call when the user explicitly asks about a specific stock or ticker. Never use to imply buy/sell signals.',
       parameters: {
         type: 'object',
         properties: {
-          symbol: {
+          ticker: {
             type: 'string',
-            description: 'Stock ticker symbol (e.g., "AAPL", "VTI")',
+            description: 'Stock ticker symbol (e.g., "AAPL", "MSFT"). Must be uppercase, 1-10 characters.',
           },
         },
-        required: ['symbol'],
+        required: ['ticker'],
       },
     },
   },
 ];
 
 // ---------------------------------------------------------------------------
-// Function implementations
+// Function Implementations
 // ---------------------------------------------------------------------------
 
-type FunctionArgs = Record<string, unknown>;
+export type FunctionName =
+  | 'get_financial_state'
+  | 'get_transactions'
+  | 'get_budget_status'
+  | 'get_holdings_detail'
+  | 'get_market_fundamentals';
 
 /**
- * Execute an AI function call against user data.
- * Returns a JSON string result for the AI to interpret.
- * IMPORTANT: Results are summarized — never raw financial payloads.
+ * Execute an AI function call and return the result as a string for the model.
+ * IMPORTANT: Returns summarized data only — never raw financial payloads.
  */
 export async function executeFunction(
-  name: string,
-  args: FunctionArgs,
+  name: FunctionName,
+  args: Record<string, unknown>,
   supabase: SupabaseClient,
   userId: string
 ): Promise<string> {
-  try {
-    switch (name) {
-      case 'get_financial_state':
-        return await handleGetFinancialState(supabase, userId);
-
-      case 'get_transactions':
-        return await handleGetTransactions(supabase, userId, args);
-
-      case 'get_budget_status':
-        return await handleGetBudgetStatus(supabase, userId, args);
-
-      case 'get_holdings_detail':
-        return await handleGetHoldingsDetail(supabase, userId, args);
-
-      case 'get_market_fundamentals':
-        return await handleGetMarketFundamentals(args);
-
-      default:
-        return JSON.stringify({ error: `Unknown function: ${name}` });
-    }
-  } catch (error) {
-    logger.error('AI function execution failed', {
-      function_name: name,
-      error_message: String(error),
-    });
-    return JSON.stringify({ error: 'Failed to retrieve data. Please try again.' });
+  switch (name) {
+    case 'get_financial_state':
+      return executeGetFinancialState(supabase, userId);
+    case 'get_transactions':
+      return executeGetTransactions(supabase, userId, args);
+    case 'get_budget_status':
+      return executeGetBudgetStatus(supabase, userId, args);
+    case 'get_holdings_detail':
+      return executeGetHoldingsDetail(supabase, userId, args);
+    case 'get_market_fundamentals':
+      return executeGetMarketFundamentals(args);
+    default:
+      return JSON.stringify({ error: 'Unknown function' });
   }
 }
 
-// --- Individual function handlers ---
-
-async function handleGetFinancialState(
+async function executeGetFinancialState(
   supabase: SupabaseClient,
   userId: string
 ): Promise<string> {
@@ -182,81 +166,81 @@ async function handleGetFinancialState(
   return JSON.stringify(state);
 }
 
-async function handleGetTransactions(
+async function executeGetTransactions(
   supabase: SupabaseClient,
   userId: string,
-  args: FunctionArgs
+  args: Record<string, unknown>
 ): Promise<string> {
-  const days = Math.min(Number(args.days) || 30, 90);
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
-  const cutoffStr = cutoff.toISOString().split('T')[0];
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+    .toISOString()
+    .split('T')[0];
+  const today = now.toISOString().split('T')[0];
+
+  const dateFrom = (args.date_from as string) || monthStart;
+  const dateTo = (args.date_to as string) || today;
+  const limit = Math.min(Number(args.limit) || 25, 50);
 
   let query = supabase
     .from('transactions')
-    .select('date, merchant_name, amount, plaid_category, is_recurring')
+    .select(`
+      date, amount, merchant_name,
+      budget_categories!transactions_user_category_id_fkey(name)
+    `)
     .eq('user_id', userId)
     .is('deleted_at', null)
-    .gte('date', cutoffStr)
+    .gte('date', dateFrom)
+    .lte('date', dateTo)
     .order('date', { ascending: false })
-    .limit(50);
+    .limit(limit);
 
-  // Filter by entity name if provided
+  // Entity filter
   if (args.entity_name) {
-    const { data: entity } = await supabase
-      .from('entities')
-      .select('id')
-      .eq('user_id', userId)
-      .ilike('name', String(args.entity_name))
-      .maybeSingle();
-    if (entity) {
-      query = query.eq('entity_id', entity.id);
-    }
+    const entityId = await resolveEntityId(supabase, userId, args.entity_name as string);
+    if (entityId) query = query.eq('entity_id', entityId);
   }
 
-  const { data: txs } = await query;
-
-  if (!txs || txs.length === 0) {
-    return JSON.stringify({ message: 'No transactions found for this period.' });
+  // Merchant filter
+  if (args.merchant) {
+    query = query.ilike('merchant_name', `%${args.merchant}%`);
   }
 
-  // Summarize rather than returning raw data
-  const total = txs.reduce((s: number, t: TxRow) => s + Number(t.amount), 0);
-  const spending = txs.filter((t: TxRow) => Number(t.amount) > 0);
-  const income = txs.filter((t: TxRow) => Number(t.amount) < 0);
+  const { data, error } = await query;
 
-  // Top merchants by spending
-  const merchantMap = new Map<string, number>();
-  for (const t of spending) {
-    const name = t.merchant_name ?? 'Unknown';
-    merchantMap.set(name, (merchantMap.get(name) ?? 0) + Number(t.amount));
+  if (error) {
+    logger.error('get_transactions function error', { error_message: error.message });
+    return JSON.stringify({ error: 'Failed to fetch transactions' });
   }
-  const topMerchants = Array.from(merchantMap.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([name, amount]) => ({ name, amount: round2(amount) }));
+
+  // Category filter (post-query since it's a join)
+  let results = (data ?? []).map((tx) => {
+    const cat = tx.budget_categories as unknown as { name: string } | null;
+    return {
+      date: tx.date,
+      amount: tx.amount,
+      merchant: tx.merchant_name ?? 'Unknown',
+      category: cat?.name ?? 'Uncategorized',
+    };
+  });
+
+  if (args.category) {
+    const catFilter = (args.category as string).toLowerCase();
+    results = results.filter((r) =>
+      r.category.toLowerCase().includes(catFilter)
+    );
+  }
 
   return JSON.stringify({
-    period_days: days,
-    transaction_count: txs.length,
-    total_spending: round2(spending.reduce((s: number, t: TxRow) => s + Number(t.amount), 0)),
-    total_income: round2(income.reduce((s: number, t: TxRow) => s + Math.abs(Number(t.amount)), 0)),
-    net: round2(-total),
-    recurring_count: txs.filter((t: TxRow) => t.is_recurring).length,
-    top_merchants: topMerchants,
-    recent: txs.slice(0, 10).map((t: TxRow) => ({
-      date: t.date,
-      merchant: t.merchant_name ?? 'Unknown',
-      amount: round2(Number(t.amount)),
-      category: t.plaid_category?.[0] ?? null,
-    })),
+    period: `${dateFrom} to ${dateTo}`,
+    count: results.length,
+    transactions: results,
   });
 }
 
-async function handleGetBudgetStatus(
+async function executeGetBudgetStatus(
   supabase: SupabaseClient,
   userId: string,
-  args: FunctionArgs
+  args: Record<string, unknown>
 ): Promise<string> {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
@@ -265,181 +249,142 @@ async function handleGetBudgetStatus(
   const today = now.toISOString().split('T')[0];
 
   // Get budget categories
-  let categoryQuery = supabase
+  let budgetQuery = supabase
     .from('budget_categories')
     .select('id, entity_id, name, monthly_budget_amount')
     .eq('user_id', userId)
     .eq('is_active', true);
 
   if (args.entity_name) {
-    const { data: entity } = await supabase
-      .from('entities')
-      .select('id')
+    const entityId = await resolveEntityId(supabase, userId, args.entity_name as string);
+    if (entityId) budgetQuery = budgetQuery.eq('entity_id', entityId);
+  }
+
+  const [budgetRes, txRes] = await Promise.all([
+    budgetQuery,
+    supabase
+      .from('transactions')
+      .select('user_category_id, amount')
       .eq('user_id', userId)
-      .ilike('name', String(args.entity_name))
-      .maybeSingle();
-    if (entity) {
-      categoryQuery = categoryQuery.eq('entity_id', entity.id);
-    }
-  }
+      .is('deleted_at', null)
+      .gte('date', monthStart)
+      .lte('date', today)
+      .gt('amount', 0), // Spending only
+  ]);
 
-  const { data: categories } = await categoryQuery;
+  const categories = budgetRes.data ?? [];
+  const transactions = txRes.data ?? [];
 
-  // Get MTD transactions
-  const { data: txs } = await supabase
-    .from('transactions')
-    .select('user_category_id, amount')
-    .eq('user_id', userId)
-    .is('deleted_at', null)
-    .gte('date', monthStart)
-    .lte('date', today);
-
-  if (!categories || categories.length === 0) {
-    return JSON.stringify({ message: 'No budget categories configured.' });
-  }
-
-  // Aggregate spending by category
+  // Sum spending per category
   const spending = new Map<string, number>();
-  for (const tx of txs ?? []) {
-    if (Number(tx.amount) <= 0) continue;
-    const catId = tx.user_category_id ?? 'uncategorized';
-    spending.set(catId, (spending.get(catId) ?? 0) + Number(tx.amount));
+  for (const tx of transactions) {
+    const catId = tx.user_category_id || 'uncategorized';
+    spending.set(catId, (spending.get(catId) || 0) + Number(tx.amount));
   }
 
-  const statuses = categories
-    .filter((c: BudgetCatRow) => c.monthly_budget_amount)
-    .map((c: BudgetCatRow) => {
-      const budgeted = Number(c.monthly_budget_amount);
-      const actual = round2(spending.get(c.id) ?? 0);
-      const remaining = round2(budgeted - actual);
-      const pctUsed = budgeted > 0 ? round2((actual / budgeted) * 100) : 0;
-
-      return {
-        category: c.name,
-        budgeted: round2(budgeted),
-        actual,
-        remaining,
-        pct_used: pctUsed,
-        status: pctUsed > 100 ? 'over_budget' : pctUsed > 80 ? 'warning' : 'on_track',
-      };
-    })
-    .sort((a: { pct_used: number }, b: { pct_used: number }) => b.pct_used - a.pct_used);
-
-  const totalBudgeted = statuses.reduce((s: number, c: { budgeted: number }) => s + c.budgeted, 0);
-  const totalActual = statuses.reduce((s: number, c: { actual: number }) => s + c.actual, 0);
-
-  return JSON.stringify({
-    month: monthStart,
-    total_budgeted: round2(totalBudgeted),
-    total_actual: round2(totalActual),
-    total_remaining: round2(totalBudgeted - totalActual),
-    day_of_month: now.getDate(),
-    categories: statuses,
-  });
-}
-
-async function handleGetHoldingsDetail(
-  supabase: SupabaseClient,
-  userId: string,
-  args: FunctionArgs
-): Promise<string> {
-  let query = supabase
-    .from('holdings')
-    .select('security_name, ticker, quantity, price, value, cost_basis')
-    .eq('user_id', userId)
-    .is('deleted_at', null)
-    .order('value', { ascending: false });
-
-  if (args.entity_name) {
-    const { data: entity } = await supabase
-      .from('entities')
-      .select('id')
-      .eq('user_id', userId)
-      .ilike('name', String(args.entity_name))
-      .maybeSingle();
-    if (entity) {
-      query = query.eq('entity_id', entity.id);
-    }
-  }
-
-  const { data: holdings } = await query;
-
-  if (!holdings || holdings.length === 0) {
-    return JSON.stringify({ message: 'No investment holdings found.' });
-  }
-
-  const totalValue = holdings.reduce((s: number, h: HoldingRow) => s + Number(h.value || 0), 0);
-  const totalCostBasis = holdings
-    .filter((h: HoldingRow) => h.cost_basis != null)
-    .reduce((s: number, h: HoldingRow) => s + Number(h.cost_basis!), 0);
-
-  const items = holdings.slice(0, 20).map((h: HoldingRow) => {
-    const value = Number(h.value || 0);
-    const cost = h.cost_basis != null ? Number(h.cost_basis) : null;
-    const gain = cost != null ? round2(value - cost) : null;
-    const gainPct = cost != null && cost > 0 ? round2(((value - cost) / cost) * 100) : null;
-
+  const status = categories.map((cat) => {
+    const spent = Math.round((spending.get(cat.id) || 0) * 100) / 100;
+    const budget = Number(cat.monthly_budget_amount) || 0;
     return {
-      name: h.security_name,
-      ticker: h.ticker,
-      quantity: Number(h.quantity),
-      price: round2(Number(h.price)),
-      value: round2(value),
-      cost_basis: cost != null ? round2(cost) : null,
-      gain,
-      gain_pct: gainPct,
-      allocation_pct: totalValue > 0 ? round2((value / totalValue) * 100) : 0,
+      category: cat.name,
+      budget_limit: budget,
+      spent_mtd: spent,
+      remaining: budget > 0 ? Math.round((budget - spent) * 100) / 100 : null,
+      percent_used: budget > 0 ? Math.round((spent / budget) * 100) : null,
     };
   });
 
   return JSON.stringify({
-    total_value: round2(totalValue),
-    total_cost_basis: round2(totalCostBasis),
-    total_gain: round2(totalValue - totalCostBasis),
-    holding_count: holdings.length,
-    holdings: items,
+    month: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`,
+    categories: status,
   });
 }
 
-async function handleGetMarketFundamentals(args: FunctionArgs): Promise<string> {
-  const symbol = String(args.symbol ?? '').toUpperCase().trim();
-  if (!symbol || symbol.length > 10) {
-    return JSON.stringify({ error: 'Invalid symbol.' });
+async function executeGetHoldingsDetail(
+  supabase: SupabaseClient,
+  userId: string,
+  args: Record<string, unknown>
+): Promise<string> {
+  let query = supabase
+    .from('holdings')
+    .select('security_name, ticker, quantity, price, value, cost_basis, entity_id')
+    .eq('user_id', userId)
+    .is('deleted_at', null);
+
+  if (args.entity_name) {
+    const entityId = await resolveEntityId(supabase, userId, args.entity_name as string);
+    if (entityId) query = query.eq('entity_id', entityId);
   }
 
-  const [quote, profile, metrics] = await Promise.all([
-    getQuote(symbol),
-    getCompanyProfile(symbol),
-    getKeyMetrics(symbol),
-  ]);
+  const { data, error } = await query;
 
-  if (!quote && !profile) {
-    return JSON.stringify({
-      error: `Could not find data for "${symbol}". Verify the ticker is correct.`,
-    });
+  if (error) {
+    logger.error('get_holdings_detail function error', { error_message: error.message });
+    return JSON.stringify({ error: 'Failed to fetch holdings' });
   }
+
+  const holdings = (data ?? []).map((h) => {
+    const gainLoss = h.cost_basis
+      ? Math.round((Number(h.value) - Number(h.cost_basis)) * 100) / 100
+      : null;
+    return {
+      security: h.security_name,
+      ticker: h.ticker,
+      quantity: h.quantity,
+      price: h.price,
+      value: h.value,
+      cost_basis: h.cost_basis,
+      gain_loss: gainLoss,
+      gain_loss_pct:
+        h.cost_basis && Number(h.cost_basis) > 0
+          ? Math.round(((Number(h.value) - Number(h.cost_basis)) / Number(h.cost_basis)) * 10000) / 100
+          : null,
+    };
+  });
+
+  const totalValue = holdings.reduce((s, h) => s + Number(h.value), 0);
 
   return JSON.stringify({
-    symbol,
-    name: profile?.companyName ?? quote?.name ?? symbol,
-    sector: profile?.sector ?? null,
-    industry: profile?.industry ?? null,
-    price: quote?.price ?? profile?.price ?? null,
-    change_pct: quote?.changesPercentage ?? null,
-    market_cap: quote?.marketCap ?? profile?.marketCap ?? null,
-    pe_ratio: quote?.pe ?? null,
-    eps: quote?.eps ?? null,
-    beta: profile?.beta ?? null,
-    dividend_yield: metrics ? (metrics.dividendYieldTTM as number) ?? null : null,
-    debt_to_equity: metrics ? (metrics.debtToEquityTTM as number) ?? null : null,
-    roe: metrics ? (metrics.roeTTM as number) ?? null : null,
-    description: profile?.description
-      ? profile.description.slice(0, 200) + '...'
-      : null,
-    note: 'This data is for educational purposes only. Not a recommendation.',
+    total_value: Math.round(totalValue * 100) / 100,
+    holding_count: holdings.length,
+    holdings,
   });
 }
 
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
+async function executeGetMarketFundamentals(
+  args: Record<string, unknown>
+): Promise<string> {
+  const ticker = (args.ticker as string || '').toUpperCase().replace(/[^A-Z0-9.]/g, '');
+  if (!ticker || ticker.length > 10) {
+    return JSON.stringify({ error: 'Invalid ticker symbol' });
+  }
+
+  try {
+    const data = await fetchFundamentals(ticker);
+    return JSON.stringify(data);
+  } catch (err) {
+    logger.error('get_market_fundamentals error', { error_message: String(err) });
+    return JSON.stringify({ error: 'Failed to fetch market data' });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+async function resolveEntityId(
+  supabase: SupabaseClient,
+  userId: string,
+  entityName: string
+): Promise<string | null> {
+  const { data } = await supabase
+    .from('entities')
+    .select('id')
+    .eq('user_id', userId)
+    .ilike('name', `%${entityName}%`)
+    .eq('is_active', true)
+    .limit(1)
+    .single();
+
+  return data?.id ?? null;
 }

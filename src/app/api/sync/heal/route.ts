@@ -1,20 +1,21 @@
 import { NextResponse } from 'next/server';
 import { getSecrets } from '@/lib/env';
 import { createServiceRoleClient } from '@/lib/supabase/server';
-import { syncTransactionsForItem, getEncryptedToken } from '@/lib/plaid/sync';
-import { writeAuditLog } from '@/lib/audit';
+import { syncTransactionsForItem, recordSyncFailure } from '@/lib/plaid/sync';
 import { logger } from '@/lib/logger';
-import type { PlaidItem } from '@/lib/types';
 
 /**
  * Cron endpoint: Heal job — runs /transactions/sync for all active plaid_items.
  * Safety net for missed webhooks.
  * Protected by CRON_SECRET bearer token.
  * Vercel Cron: runs daily at 3 AM.
+ *
+ * This ensures data integrity by syncing ALL active items regardless of
+ * whether webhooks were received. Missed webhooks, network issues, or
+ * Plaid outages are all covered by this daily sweep.
  */
 export async function GET(request: Request) {
   try {
-    // Verify CRON_SECRET
     const authHeader = request.headers.get('authorization');
     const secrets = getSecrets();
 
@@ -25,94 +26,78 @@ export async function GET(request: Request) {
 
     const supabase = createServiceRoleClient();
 
-    // Fetch all active plaid items (connected or degraded — not disconnected)
-    const { data: plaidItems, error: fetchError } = await supabase
+    // Fetch ALL active plaid_items (connected or degraded — not disconnected/reauth)
+    const { data: items, error: fetchError } = await supabase
       .from('plaid_items')
-      .select('*')
+      .select('id, user_id, entity_id, plaid_item_id, status, last_successful_sync')
       .in('status', ['connected', 'degraded']);
 
     if (fetchError) {
-      logger.error('Failed to fetch plaid items for heal', {
-        error_message: fetchError.message,
-      });
+      logger.error('Failed to fetch plaid_items for heal', { error_message: fetchError.message });
       return NextResponse.json({ error: 'Internal error.' }, { status: 500 });
     }
 
-    if (!plaidItems || plaidItems.length === 0) {
-      return NextResponse.json({ status: 'ok', healed: 0, message: 'No active items' });
+    if (!items || items.length === 0) {
+      logger.info('Heal job: no active plaid_items found');
+      return NextResponse.json({ status: 'ok', healed: 0 });
     }
 
-    let healed = 0;
-    let errors = 0;
+    let totalHealed = 0;
+    let totalErrors = 0;
+    const results: Array<{ item_id: string; status: string; details?: string }> = [];
 
-    for (const item of plaidItems as PlaidItem[]) {
+    for (const item of items) {
       try {
-        const encryptedToken = await getEncryptedToken(supabase, item.id);
-        if (!encryptedToken) {
-          logger.warn('No token for plaid item during heal', {
-            plaid_item_id: item.id,
-          });
-          errors++;
-          continue;
-        }
+        const result = await syncTransactionsForItem(
+          supabase,
+          item.id,
+          item.user_id,
+          item.entity_id
+        );
 
-        const result = await syncTransactionsForItem(supabase, item, encryptedToken);
-
-        await writeAuditLog(supabase, {
-          userId: item.user_id,
-          action: 'PLAID_SYNC_COMPLETED',
-          entityType: 'plaid_item',
-          entityId: item.id,
-          details: {
-            trigger: 'heal_job',
-            added: result.added,
-            modified: result.modified,
-            removed: result.removed,
-          },
+        totalHealed++;
+        results.push({
+          item_id: item.id,
+          status: 'healed',
+          details: `+${result.added} ~${result.modified} -${result.removed}`,
         });
 
-        healed++;
+        logger.info('Heal sync completed for item', {
+          plaid_item_db_id: item.id,
+          added: result.added,
+          modified: result.modified,
+          removed: result.removed,
+        });
       } catch (error) {
+        const errorMessage = String(error);
+        totalErrors++;
+        results.push({
+          item_id: item.id,
+          status: 'error',
+          details: errorMessage.slice(0, 200),
+        });
+
         logger.error('Heal sync failed for item', {
-          error_message: String(error),
-          plaid_item_id: item.id,
+          plaid_item_db_id: item.id,
+          error_message: errorMessage,
         });
 
-        await writeAuditLog(supabase, {
-          userId: item.user_id,
-          action: 'PLAID_SYNC_FAILED',
-          entityType: 'plaid_item',
-          entityId: item.id,
-          details: {
-            trigger: 'heal_job',
-            error: String(error).slice(0, 200),
-          },
-        });
-
-        // Increment error count on the item
-        await supabase
-          .from('plaid_items')
-          .update({
-            error_count: item.error_count + 1,
-            last_error_code: 'HEAL_SYNC_FAILED',
-          })
-          .eq('id', item.id);
-
-        errors++;
+        await recordSyncFailure(supabase, item.id, item.user_id, 'HEAL_SYNC_ERROR');
       }
     }
 
     logger.info('Heal job completed', {
-      total: String(plaidItems.length),
-      healed: String(healed),
-      errors: String(errors),
+      total_items: items.length,
+      healed: totalHealed,
+      errors: totalErrors,
     });
 
     return NextResponse.json({
       status: 'ok',
-      total: plaidItems.length,
-      healed,
-      errors,
+      total: items.length,
+      healed: totalHealed,
+      errors: totalErrors,
+      results,
     });
   } catch (error) {
     logger.error('Heal job cron error', { error_message: String(error) });

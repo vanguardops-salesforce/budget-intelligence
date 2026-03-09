@@ -1,8 +1,20 @@
-import { type SupabaseClient } from '@supabase/supabase-js';
+/**
+ * Plaid transaction sync engine.
+ * Implements the /transactions/sync cursor-based approach.
+ *
+ * Pipeline:
+ * 1. Decrypt the access token from private.plaid_tokens
+ * 2. Call Plaid /transactions/sync with the cursor
+ * 3. Upsert added/modified transactions, soft-delete removed ones
+ * 4. Update the cursor and sync timestamp on plaid_items
+ */
+
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { RemovedTransaction, Transaction as PlaidTransaction } from 'plaid';
 import { getPlaidClient } from './client';
 import { decrypt } from '../crypto';
 import { logger } from '../logger';
-import type { PlaidItem } from '../types';
+import { writeAuditLog } from '../audit';
 
 export interface SyncResult {
   added: number;
@@ -12,206 +24,266 @@ export interface SyncResult {
 }
 
 /**
- * Sync transactions for a single Plaid item using /transactions/sync.
- * Uses cursor-based pagination to fetch incremental updates.
+ * Sync transactions for a single plaid_item.
+ * Uses cursor-based pagination to get incremental updates.
  *
  * @param supabase - Service role client (bypasses RLS)
- * @param plaidItem - The plaid_items row
- * @param encryptedAccessToken - Encrypted access token from private.plaid_tokens
+ * @param plaidItemDbId - The UUID of the plaid_items row
+ * @param userId - The owning user's ID
+ * @param entityId - The entity this item belongs to
  */
 export async function syncTransactionsForItem(
   supabase: SupabaseClient,
-  plaidItem: PlaidItem,
-  encryptedAccessToken: string
+  plaidItemDbId: string,
+  userId: string,
+  entityId: string
 ): Promise<SyncResult> {
-  const plaid = getPlaidClient();
-  const accessToken = decrypt(encryptedAccessToken);
+  const plaidClient = getPlaidClient();
 
-  let cursor = plaidItem.transactions_cursor ?? undefined;
-  let added = 0;
-  let modified = 0;
-  let removed = 0;
+  // 1. Get the current cursor and plaid_item_id
+  const { data: plaidItem, error: itemError } = await supabase
+    .from('plaid_items')
+    .select('plaid_item_id, transactions_cursor')
+    .eq('id', plaidItemDbId)
+    .single();
+
+  if (itemError || !plaidItem) {
+    throw new Error(`Failed to fetch plaid_item ${plaidItemDbId}: ${itemError?.message}`);
+  }
+
+  // 2. Decrypt the access token from private schema
+  const { data: tokenRow, error: tokenError } = await supabase
+    .schema('private')
+    .from('plaid_tokens')
+    .select('access_token_encrypted')
+    .eq('plaid_item_id', plaidItemDbId)
+    .single();
+
+  if (tokenError || !tokenRow) {
+    throw new Error(`Failed to fetch token for plaid_item ${plaidItemDbId}: ${tokenError?.message}`);
+  }
+
+  const accessToken = decrypt(tokenRow.access_token_encrypted);
+
+  // 3. Build account lookup map (plaid_account_id → account UUID)
+  const { data: accounts, error: acctError } = await supabase
+    .from('accounts')
+    .select('id, plaid_account_id')
+    .eq('plaid_item_id', plaidItemDbId)
+    .is('deleted_at', null);
+
+  if (acctError) {
+    throw new Error(`Failed to fetch accounts for plaid_item ${plaidItemDbId}: ${acctError.message}`);
+  }
+
+  const accountMap = new Map<string, string>();
+  for (const acct of accounts || []) {
+    accountMap.set(acct.plaid_account_id, acct.id);
+  }
+
+  // 4. Paginate through /transactions/sync
+  let cursor = plaidItem.transactions_cursor || '';
   let hasMore = true;
+  let totalAdded = 0;
+  let totalModified = 0;
+  let totalRemoved = 0;
 
   while (hasMore) {
-    const response = await plaid.transactionsSync({
+    const response = await plaidClient.transactionsSync({
       access_token: accessToken,
-      cursor,
+      cursor: cursor || undefined,
       count: 500,
     });
 
-    const data = response.data;
+    const { added, modified, removed, next_cursor, has_more } = response.data;
 
-    // Process added transactions
-    if (data.added.length > 0) {
-      const plaidAccountIds = Array.from(new Set(data.added.map((t) => t.account_id)));
-      const { data: accountMap } = await supabase
-        .from('accounts')
-        .select('id, plaid_account_id')
-        .in('plaid_account_id', plaidAccountIds);
-
-      const accountLookup = new Map(
-        (accountMap ?? []).map((a: { id: string; plaid_account_id: string }) => [a.plaid_account_id, a.id])
-      );
-
-      const rows = data.added
-        .map((txn) => ({
-          user_id: plaidItem.user_id,
-          entity_id: plaidItem.entity_id,
-          account_id: accountLookup.get(txn.account_id) ?? null,
-          plaid_transaction_id: txn.transaction_id,
-          amount: txn.amount,
-          date: txn.date,
-          merchant_name: txn.merchant_name ?? txn.name ?? null,
-          plaid_category: txn.personal_finance_category
-            ? { primary: txn.personal_finance_category.primary, detailed: txn.personal_finance_category.detailed }
-            : null,
-          is_recurring: false,
-        }))
-        .filter((row) => row.account_id !== null);
-
-      if (rows.length > 0) {
-        const { error } = await supabase
-          .from('transactions')
-          .upsert(rows, { onConflict: 'plaid_transaction_id' });
-
-        if (error) {
-          logger.error('Failed to upsert added transactions', {
-            error_message: error.message,
-            plaid_item_id: plaidItem.plaid_item_id,
-            count: String(rows.length),
-          });
-        }
-      }
-      added += rows.length;
+    if (added.length > 0) {
+      await upsertTransactions(supabase, added, userId, entityId, accountMap);
+      totalAdded += added.length;
     }
 
-    // Process modified transactions
-    if (data.modified.length > 0) {
-      for (const txn of data.modified) {
-        const { error } = await supabase
-          .from('transactions')
-          .update({
-            amount: txn.amount,
-            date: txn.date,
-            merchant_name: txn.merchant_name ?? txn.name ?? null,
-            plaid_category: txn.personal_finance_category
-              ? { primary: txn.personal_finance_category.primary, detailed: txn.personal_finance_category.detailed }
-              : null,
-          })
-          .eq('plaid_transaction_id', txn.transaction_id);
-
-        if (error) {
-          logger.error('Failed to update modified transaction', {
-            error_message: error.message,
-            plaid_transaction_id: txn.transaction_id,
-          });
-        }
-      }
-      modified += data.modified.length;
+    if (modified.length > 0) {
+      await upsertTransactions(supabase, modified, userId, entityId, accountMap);
+      totalModified += modified.length;
     }
 
-    // Process removed transactions (soft-delete)
-    if (data.removed.length > 0) {
-      const removedIds = data.removed
-        .map((r) => r.transaction_id)
-        .filter((id): id is string => id != null);
-
-      if (removedIds.length > 0) {
-        const { error } = await supabase
-          .from('transactions')
-          .update({ deleted_at: new Date().toISOString() })
-          .in('plaid_transaction_id', removedIds);
-
-        if (error) {
-          logger.error('Failed to soft-delete removed transactions', {
-            error_message: error.message,
-            count: String(removedIds.length),
-          });
-        }
-      }
-      removed += removedIds.length;
+    if (removed.length > 0) {
+      await softDeleteTransactions(supabase, removed);
+      totalRemoved += removed.length;
     }
 
-    cursor = data.next_cursor;
-    hasMore = data.has_more;
+    cursor = next_cursor;
+    hasMore = has_more;
   }
 
-  // Update account balances
-  await syncAccountBalances(supabase, plaidItem, accessToken);
-
-  // Save cursor and update sync timestamp
-  await supabase
+  // 5. Update cursor and sync timestamp
+  const { error: updateError } = await supabase
     .from('plaid_items')
     .update({
       transactions_cursor: cursor,
       last_successful_sync: new Date().toISOString(),
-      error_count: 0,
       last_error_code: null,
-      status: 'connected',
+      error_count: 0,
     })
-    .eq('id', plaidItem.id);
+    .eq('id', plaidItemDbId);
+
+  if (updateError) {
+    logger.error('Failed to update plaid_item cursor', {
+      plaid_item_id: plaidItemDbId,
+      error_message: updateError.message,
+    });
+  }
+
+  // 6. Audit log
+  await writeAuditLog(supabase, {
+    userId,
+    action: 'PLAID_SYNC_COMPLETED',
+    entityType: 'plaid_item',
+    entityId: plaidItemDbId,
+    details: {
+      added: totalAdded,
+      modified: totalModified,
+      removed: totalRemoved,
+      cursor_updated: true,
+    },
+  });
 
   logger.info('Transaction sync completed', {
-    plaid_item_id: plaidItem.plaid_item_id,
-    added: String(added),
-    modified: String(modified),
-    removed: String(removed),
+    plaid_item_id: plaidItemDbId,
+    added: totalAdded,
+    modified: totalModified,
+    removed: totalRemoved,
   });
 
-  return { added, modified, removed, cursor: cursor ?? '' };
+  return {
+    added: totalAdded,
+    modified: totalModified,
+    removed: totalRemoved,
+    cursor,
+  };
 }
 
 /**
- * Fetch and update account balances from Plaid.
+ * Upsert transactions from Plaid into the transactions table.
+ * Uses plaid_transaction_id as the unique key for conflict resolution.
  */
-async function syncAccountBalances(
+async function upsertTransactions(
   supabase: SupabaseClient,
-  plaidItem: PlaidItem,
-  accessToken: string
+  transactions: PlaidTransaction[],
+  userId: string,
+  entityId: string,
+  accountMap: Map<string, string>
 ): Promise<void> {
-  const plaid = getPlaidClient();
+  const rows = transactions
+    .map((txn) => {
+      const accountId = accountMap.get(txn.account_id);
+      if (!accountId) {
+        logger.warn('Unknown account_id in transaction, skipping', {
+          plaid_account_id: txn.account_id,
+          plaid_transaction_id: txn.transaction_id,
+        });
+        return null;
+      }
 
-  try {
-    const response = await plaid.accountsGet({ access_token: accessToken });
+      return {
+        user_id: userId,
+        entity_id: entityId,
+        account_id: accountId,
+        plaid_transaction_id: txn.transaction_id,
+        amount: txn.amount,
+        date: txn.date,
+        merchant_name: txn.merchant_name || txn.name || null,
+        plaid_category: txn.category || null,
+        is_recurring:
+          txn.personal_finance_category?.primary === 'LOAN_PAYMENTS' ||
+          txn.personal_finance_category?.primary === 'RENT_AND_UTILITIES' ||
+          false,
+      };
+    })
+    .filter(Boolean);
 
-    for (const account of response.data.accounts) {
-      await supabase
-        .from('accounts')
-        .update({
-          current_balance: account.balances.current,
-          available_balance: account.balances.available,
-        })
-        .eq('plaid_account_id', account.account_id);
-    }
-  } catch (error) {
-    logger.error('Failed to sync account balances', {
-      error_message: String(error),
-      plaid_item_id: plaidItem.plaid_item_id,
+  if (rows.length === 0) return;
+
+  const { error } = await supabase
+    .from('transactions')
+    .upsert(rows, {
+      onConflict: 'plaid_transaction_id',
+      ignoreDuplicates: false,
+    });
+
+  if (error) {
+    logger.error('Failed to upsert transactions', {
+      error_message: error.message,
+      count: rows.length,
+    });
+    throw new Error(`Transaction upsert failed: ${error.message}`);
+  }
+}
+
+/**
+ * Soft-delete transactions that Plaid reports as removed.
+ */
+async function softDeleteTransactions(
+  supabase: SupabaseClient,
+  removed: RemovedTransaction[]
+): Promise<void> {
+  const plaidIds = removed
+    .map((r) => r.transaction_id)
+    .filter((id): id is string => !!id);
+
+  if (plaidIds.length === 0) return;
+
+  const { error } = await supabase
+    .from('transactions')
+    .update({ deleted_at: new Date().toISOString() })
+    .in('plaid_transaction_id', plaidIds);
+
+  if (error) {
+    logger.error('Failed to soft-delete transactions', {
+      error_message: error.message,
+      count: plaidIds.length,
     });
   }
 }
 
 /**
- * Get the encrypted access token for a plaid item.
- * Uses service role client to query private.plaid_tokens via RPC.
+ * Record a sync failure on a plaid_item.
+ * Increments error_count and marks item as degraded after 5 consecutive failures.
  */
-export async function getEncryptedToken(
+export async function recordSyncFailure(
   supabase: SupabaseClient,
-  plaidItemId: string
-): Promise<string | null> {
-  // Use raw SQL via rpc since private schema isn't exposed via PostgREST
-  const { data, error } = await supabase.rpc('get_plaid_token', {
-    p_plaid_item_id: plaidItemId,
-  });
+  plaidItemDbId: string,
+  userId: string,
+  errorCode: string
+): Promise<void> {
+  const { data: item } = await supabase
+    .from('plaid_items')
+    .select('error_count')
+    .eq('id', plaidItemDbId)
+    .single();
 
-  if (error || !data) {
-    logger.error('Failed to fetch encrypted token', {
-      error_message: error?.message ?? 'No token found',
-      plaid_item_id: plaidItemId,
-    });
-    return null;
+  const newErrorCount = (item?.error_count || 0) + 1;
+  const ERROR_THRESHOLD = 5;
+
+  const updates: Record<string, unknown> = {
+    last_error_code: errorCode,
+    error_count: newErrorCount,
+  };
+
+  if (newErrorCount >= ERROR_THRESHOLD) {
+    updates.status = 'degraded';
   }
 
-  return data;
+  await supabase
+    .from('plaid_items')
+    .update(updates)
+    .eq('id', plaidItemDbId);
+
+  await writeAuditLog(supabase, {
+    userId,
+    action: 'PLAID_SYNC_FAILED',
+    entityType: 'plaid_item',
+    entityId: plaidItemDbId,
+    details: { error_code: errorCode, error_count: newErrorCount },
+  });
 }

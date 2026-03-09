@@ -54,6 +54,12 @@ export default function MFAVerifyPage() {
         return;
       }
 
+      fetch('/api/auth/audit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'AUTH_MFA_VERIFIED' }),
+      }).catch(() => {});
+
       // MFA verified — redirect to dashboard
       router.push('/');
     } catch {

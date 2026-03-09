@@ -24,9 +24,20 @@ export default function LoginPage() {
       });
 
       if (authError) {
+        fetch('/api/auth/audit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'AUTH_FAILED_LOGIN' }),
+        }).catch(() => {});
         setError('Invalid email or password.');
         return;
       }
+
+      fetch('/api/auth/audit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'AUTH_LOGIN' }),
+      }).catch(() => {});
 
       // Check if MFA is enrolled
       const { data: factors } = await supabase.auth.mfa.listFactors();

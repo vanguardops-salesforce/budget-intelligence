@@ -1,18 +1,20 @@
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createServerSupabaseClient, createServiceRoleClient } from '@/lib/supabase/server';
 import { requireMFA } from '@/lib/supabase/auth-config';
-import { toClientError } from '@/lib/errors';
+import { getPlaidClient } from '@/lib/plaid/client';
+import { encrypt } from '@/lib/crypto';
+import { toClientError, ValidationError } from '@/lib/errors';
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit';
 import { getClientIP, writeAuditLog } from '@/lib/audit';
 import { logger } from '@/lib/logger';
-import { getPlaidClient } from '@/lib/plaid/client';
-import { encrypt } from '@/lib/crypto';
-import { z } from 'zod';
 
-const bodySchema = z.object({
+const exchangeTokenSchema = z.object({
   public_token: z.string().min(1),
   entity_id: z.string().uuid(),
-  institution_name: z.string().optional(),
+  institution: z.object({
+    name: z.string().optional(),
+  }).optional(),
 });
 
 export async function POST(request: Request) {
@@ -33,102 +35,105 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
-    const parsed = bodySchema.safeParse(body);
+    const parsed = exchangeTokenSchema.safeParse(body);
     if (!parsed.success) {
-      return NextResponse.json({ error: 'Invalid request.' }, { status: 400 });
+      throw new ValidationError('Invalid request body');
     }
 
-    // Verify entity ownership
-    const { data: entity } = await supabase
+    const { public_token, entity_id, institution } = parsed.data;
+
+    // Verify entity ownership (RLS enforces user_id match)
+    const { data: entity, error: entityError } = await supabase
       .from('entities')
       .select('id')
-      .eq('id', parsed.data.entity_id)
-      .eq('user_id', user.id)
+      .eq('id', entity_id)
       .eq('is_active', true)
       .single();
 
-    if (!entity) {
-      return NextResponse.json({ error: 'Entity not found.' }, { status: 404 });
+    if (entityError || !entity) {
+      return NextResponse.json({ error: 'Invalid entity.' }, { status: 400 });
     }
 
-    // Exchange public token for access token
-    const plaid = getPlaidClient();
-    const exchangeResponse = await plaid.itemPublicTokenExchange({
-      public_token: parsed.data.public_token,
+    // Exchange public token for access token via Plaid
+    const plaidClient = getPlaidClient();
+    const exchangeResponse = await plaidClient.itemPublicTokenExchange({
+      public_token,
     });
 
     const accessToken = exchangeResponse.data.access_token;
     const plaidItemId = exchangeResponse.data.item_id;
 
-    // Encrypt the access token
-    const encryptedToken = encrypt(accessToken);
-
-    // Use service role client for private schema operations
+    // Service role client for private schema operations
     const serviceClient = createServiceRoleClient();
 
-    // Create plaid_items record
-    const { data: plaidItem, error: itemError } = await serviceClient
+    // Insert plaid_item record
+    const { data: plaidItemRow, error: itemInsertError } = await serviceClient
       .from('plaid_items')
       .insert({
         user_id: user.id,
-        entity_id: parsed.data.entity_id,
+        entity_id,
         plaid_item_id: plaidItemId,
-        institution_name: parsed.data.institution_name ?? null,
+        institution_name: institution?.name || null,
         status: 'connected',
       })
       .select('id')
       .single();
 
-    if (itemError || !plaidItem) {
-      logger.error('Failed to create plaid_items record', {
-        error_message: itemError?.message ?? 'Unknown error',
-      });
-      return NextResponse.json({ error: 'Failed to save connection.' }, { status: 500 });
+    if (itemInsertError || !plaidItemRow) {
+      logger.error('Failed to insert plaid_item', { error_message: itemInsertError?.message });
+      return NextResponse.json({ error: 'Failed to store connection.' }, { status: 500 });
     }
 
-    // Store encrypted token in private.plaid_tokens via RPC
-    const { error: tokenError } = await serviceClient.rpc('store_plaid_token', {
-      p_plaid_item_id: plaidItem.id,
-      p_encrypted_token: encryptedToken,
-    });
-
-    if (tokenError) {
-      logger.error('Failed to store encrypted token', {
-        error_message: tokenError.message,
+    // Encrypt the access token and store in private.plaid_tokens
+    const encryptedToken = encrypt(accessToken);
+    const { error: tokenInsertError } = await serviceClient
+      .schema('private')
+      .from('plaid_tokens')
+      .insert({
+        plaid_item_id: plaidItemRow.id,
+        access_token_encrypted: encryptedToken,
       });
-      // Clean up the plaid_items record since token storage failed
-      await serviceClient.from('plaid_items').delete().eq('id', plaidItem.id);
-      return NextResponse.json({ error: 'Failed to save connection.' }, { status: 500 });
+
+    if (tokenInsertError) {
+      logger.error('Failed to store encrypted token', { error_message: tokenInsertError.message });
+      // Roll back the plaid_item since token storage failed
+      await serviceClient.from('plaid_items').delete().eq('id', plaidItemRow.id);
+      return NextResponse.json({ error: 'Failed to store credentials.' }, { status: 500 });
     }
 
-    // Fetch and store accounts from Plaid
-    const accountsResponse = await plaid.accountsGet({ access_token: accessToken });
+    // Fetch accounts from Plaid and store them
+    try {
+      const accountsResponse = await plaidClient.accountsGet({
+        access_token: accessToken,
+      });
 
-    const accountRows = accountsResponse.data.accounts.map((account) => ({
-      user_id: user.id,
-      entity_id: parsed.data.entity_id,
-      plaid_item_id: plaidItem.id,
-      plaid_account_id: account.account_id,
-      name: account.name,
-      official_name: account.official_name ?? null,
-      type: mapPlaidAccountType(account.type),
-      subtype: account.subtype ?? null,
-      current_balance: account.balances.current,
-      available_balance: account.balances.available,
-      currency: account.balances.iso_currency_code ?? 'USD',
-      mask: account.mask ?? null,
-    }));
+      const accountRows = accountsResponse.data.accounts.map((acct) => ({
+        user_id: user.id,
+        entity_id,
+        plaid_item_id: plaidItemRow.id,
+        plaid_account_id: acct.account_id,
+        name: acct.name,
+        official_name: acct.official_name || null,
+        type: acct.type || 'other',
+        subtype: acct.subtype || null,
+        current_balance: acct.balances.current,
+        available_balance: acct.balances.available,
+        currency: acct.balances.iso_currency_code || 'USD',
+        mask: acct.mask || null,
+      }));
 
-    if (accountRows.length > 0) {
-      const { error: accountsError } = await serviceClient
-        .from('accounts')
-        .insert(accountRows);
+      if (accountRows.length > 0) {
+        const { error: acctInsertError } = await serviceClient
+          .from('accounts')
+          .insert(accountRows);
 
-      if (accountsError) {
-        logger.error('Failed to store accounts', {
-          error_message: accountsError.message,
-        });
+        if (acctInsertError) {
+          logger.error('Failed to insert accounts', { error_message: acctInsertError.message });
+        }
       }
+    } catch (acctError) {
+      // Non-fatal — the sync cron will pick up accounts later
+      logger.warn('Failed to fetch initial accounts', { error_message: String(acctError) });
     }
 
     // Audit log
@@ -136,37 +141,28 @@ export async function POST(request: Request) {
       userId: user.id,
       action: 'PLAID_ITEM_LINKED',
       entityType: 'plaid_item',
-      entityId: plaidItem.id,
+      entityId: plaidItemRow.id,
       details: {
-        institution_name: parsed.data.institution_name,
-        accounts_count: accountRows.length,
+        institution_name: institution?.name,
+        plaid_item_id: plaidItemId,
+        ip_address: ip,
       },
       ipAddress: ip,
     });
 
     logger.info('Plaid item linked successfully', {
       user_id: user.id,
-      plaid_item_id: plaidItemId,
-      accounts_count: String(accountRows.length),
+      plaid_item_db_id: plaidItemRow.id,
     });
 
     return NextResponse.json({
-      item_id: plaidItem.id,
-      accounts: accountRows.length,
+      success: true,
+      plaid_item_id: plaidItemRow.id,
+      institution_name: institution?.name || null,
     });
   } catch (error) {
     logger.error('exchange-token error', { error_message: String(error) });
     const clientError = toClientError(error);
     return NextResponse.json({ error: clientError.error }, { status: clientError.status });
   }
-}
-
-function mapPlaidAccountType(plaidType: string): string {
-  const mapping: Record<string, string> = {
-    depository: 'depository',
-    credit: 'credit',
-    investment: 'investment',
-    loan: 'loan',
-  };
-  return mapping[plaidType] ?? 'other';
 }

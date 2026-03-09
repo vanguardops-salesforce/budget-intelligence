@@ -1,143 +1,290 @@
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PlaidLink } from '@/components/plaid-link';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
+import { formatCurrency, formatRelativeTime, maskAccount } from '@/lib/format';
+import {
+  DollarSign,
+  Wallet,
+  TrendingDown,
+  TrendingUp,
+  Landmark,
+  CreditCard,
+  CircleDot,
+  AlertTriangle,
+} from 'lucide-react';
 
 export default async function DashboardPage() {
   const supabase = createServerSupabaseClient();
 
-  // Fetch summary data (Phase 3 will wire these to real data)
-  const { data: entities } = await supabase
-    .from('entities')
-    .select('id, name, type')
-    .eq('is_active', true);
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+  const today = now.toISOString().split('T')[0];
 
-  const { data: accounts } = await supabase
-    .from('accounts')
-    .select('id, name, type, current_balance, mask, is_active')
-    .eq('is_active', true)
-    .is('deleted_at', null);
+  // Parallel data fetching
+  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes] = await Promise.all([
+    supabase.from('entities').select('id, name, type').eq('is_active', true),
+    supabase
+      .from('accounts')
+      .select('id, name, type, subtype, current_balance, available_balance, mask, is_active, plaid_item_id')
+      .eq('is_active', true)
+      .is('deleted_at', null),
+    supabase
+      .from('plaid_items')
+      .select('id, institution_name, status, last_successful_sync, error_count, last_error_code'),
+    supabase
+      .from('transactions')
+      .select('amount')
+      .is('deleted_at', null)
+      .gte('date', monthStart)
+      .lte('date', today),
+    supabase
+      .from('holdings')
+      .select('value')
+      .is('deleted_at', null),
+  ]);
 
-  const { data: plaidItems } = await supabase
-    .from('plaid_items')
-    .select('id, institution_name, status, last_successful_sync');
+  const entities = entitiesRes.data ?? [];
+  const accounts = accountsRes.data ?? [];
+  const plaidItems = plaidItemsRes.data ?? [];
+  const transactions = txRes.data ?? [];
+  const holdings = holdingsRes.data ?? [];
 
-  return (
-    <div className="space-y-6">
-      <h2 className="text-xl font-semibold text-gray-900">Overview</h2>
+  // Compute metrics
+  const totalCash = accounts
+    .filter((a) => a.type === 'depository')
+    .reduce((sum, a) => sum + (Number(a.current_balance) || 0), 0);
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <SummaryCard title="Net Worth" value="--" subtitle="Connect accounts to see" />
-        <SummaryCard title="Total Cash" value="--" subtitle="Across all accounts" />
-        <SummaryCard title="MTD Spending" value="--" subtitle="This month" />
-        <SummaryCard title="Forecast" value="--" subtitle="30-day projection" />
-      </div>
+  const totalCredit = accounts
+    .filter((a) => a.type === 'credit')
+    .reduce((sum, a) => sum + (Number(a.current_balance) || 0), 0);
 
-      {/* Connect new account */}
-      <div className="rounded-lg border bg-white p-6">
-        <h3 className="text-lg font-medium text-gray-900">Connect Bank Account</h3>
-        <p className="mt-1 text-sm text-gray-500">
-          Link your bank, credit card, or investment account via Plaid.
-        </p>
-        <div className="mt-4">
-          <PlaidLink entities={entities ?? []} />
-        </div>
-      </div>
+  const totalInvestments = holdings.reduce((sum, h) => sum + (Number(h.value) || 0), 0);
 
-      {/* Connection status */}
-      <div className="rounded-lg border bg-white p-6">
-        <h3 className="text-lg font-medium text-gray-900">Connected Accounts</h3>
-        {(!plaidItems || plaidItems.length === 0) ? (
-          <p className="mt-4 text-sm text-gray-500">
-            No accounts connected yet. Use the form above to connect your bank accounts.
-          </p>
-        ) : (
-          <div className="mt-4 space-y-3">
-            {plaidItems.map((item) => (
-              <div key={item.id} className="flex items-center justify-between rounded-md border p-3">
-                <div>
-                  <p className="text-sm font-medium text-gray-900">
-                    {item.institution_name ?? 'Unknown Institution'}
-                  </p>
-                  <p className="text-xs text-gray-500">
-                    Last synced: {item.last_successful_sync
-                      ? new Date(item.last_successful_sync).toLocaleString()
-                      : 'Never'}
-                  </p>
-                </div>
-                <StatusBadge status={item.status} />
-              </div>
-            ))}
+  const totalLoans = accounts
+    .filter((a) => a.type === 'loan')
+    .reduce((sum, a) => sum + (Number(a.current_balance) || 0), 0);
 
-            {/* Show linked accounts under their items */}
-            {accounts && accounts.length > 0 && (
-              <div className="mt-4 border-t pt-4">
-                <h4 className="text-sm font-medium text-gray-700">Accounts</h4>
-                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {accounts.map((acct) => (
-                    <div key={acct.id} className="flex items-center justify-between rounded-md border p-2.5">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{acct.name}</p>
-                        <p className="text-xs text-gray-500">
-                          {acct.type}{acct.mask ? ` ····${acct.mask}` : ''}
-                        </p>
-                      </div>
-                      <p className="text-sm font-semibold text-gray-900">
-                        {acct.current_balance != null
-                          ? `$${Number(acct.current_balance).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
-                          : '--'}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+  const netWorth = totalCash + totalInvestments - totalCredit - totalLoans;
 
-      {/* Entities */}
-      <div className="rounded-lg border bg-white p-6">
-        <h3 className="text-lg font-medium text-gray-900">Entities</h3>
-        {(!entities || entities.length === 0) ? (
-          <p className="mt-4 text-sm text-gray-500">
-            No entities configured. Run the seed SQL to create your entities.
-          </p>
-        ) : (
-          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            {entities.map((entity) => (
-              <div key={entity.id} className="rounded-md border p-4">
-                <p className="font-medium text-gray-900">{entity.name}</p>
-                <p className="text-xs uppercase text-gray-500">{entity.type}</p>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+  const mtdSpending = transactions
+    .filter((t) => Number(t.amount) > 0)
+    .reduce((sum, t) => sum + Number(t.amount), 0);
 
-function SummaryCard({ title, value, subtitle }: { title: string; value: string; subtitle: string }) {
-  return (
-    <div className="rounded-lg border bg-white p-5">
-      <p className="text-sm font-medium text-gray-500">{title}</p>
-      <p className="mt-1 text-2xl font-bold text-gray-900">{value}</p>
-      <p className="mt-1 text-xs text-gray-400">{subtitle}</p>
-    </div>
-  );
-}
+  const mtdIncome = transactions
+    .filter((t) => Number(t.amount) < 0)
+    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
 
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    connected: 'bg-green-100 text-green-700',
-    degraded: 'bg-yellow-100 text-yellow-700',
-    disconnected: 'bg-red-100 text-red-700',
-    reauth_required: 'bg-orange-100 text-orange-700',
+  const hasAccounts = accounts.length > 0;
+
+  const accountTypeIcon: Record<string, typeof Landmark> = {
+    depository: Landmark,
+    credit: CreditCard,
+    investment: TrendingUp,
+    loan: AlertTriangle,
+    other: CircleDot,
   };
 
   return (
-    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${styles[status] ?? 'bg-gray-100 text-gray-700'}`}>
-      {status.replace('_', ' ')}
-    </span>
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold tracking-tight">Overview</h2>
+        <p className="text-muted-foreground">
+          Your financial snapshot at a glance.
+        </p>
+      </div>
+
+      {/* Summary Cards */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Net Worth</CardTitle>
+            <DollarSign className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {hasAccounts ? formatCurrency(netWorth) : '--'}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {hasAccounts
+                ? `${formatCurrency(totalCash + totalInvestments)} assets — ${formatCurrency(totalCredit + totalLoans)} liabilities`
+                : 'Connect accounts to see'}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Total Cash</CardTitle>
+            <Wallet className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {hasAccounts ? formatCurrency(totalCash) : '--'}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {hasAccounts
+                ? `Across ${accounts.filter((a) => a.type === 'depository').length} account(s)`
+                : 'Across all accounts'}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">MTD Spending</CardTitle>
+            <TrendingDown className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {hasAccounts ? formatCurrency(mtdSpending) : '--'}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {hasAccounts ? `Since ${monthStart}` : 'This month'}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">MTD Income</CardTitle>
+            <TrendingUp className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-green-600">
+              {hasAccounts ? formatCurrency(mtdIncome) : '--'}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {hasAccounts ? `Since ${monthStart}` : 'This month'}
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Connect Bank Account */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Connect Bank Account</CardTitle>
+          <CardDescription>
+            Link your bank, credit card, or investment account via Plaid.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <PlaidLink entities={entities} />
+        </CardContent>
+      </Card>
+
+      {/* Connected Institutions */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Connected Institutions</CardTitle>
+          <CardDescription>
+            {plaidItems.length === 0
+              ? 'No accounts connected yet.'
+              : `${plaidItems.length} institution(s) linked`}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {plaidItems.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Use the form above to connect your bank accounts.
+            </p>
+          ) : (
+            <div className="space-y-4">
+              {plaidItems.map((item) => (
+                <div key={item.id} className="flex items-center justify-between rounded-lg border p-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium leading-none">
+                        {item.institution_name ?? 'Unknown Institution'}
+                      </p>
+                      <ConnectionBadge status={item.status} />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Last synced:{' '}
+                      {item.last_successful_sync
+                        ? formatRelativeTime(item.last_successful_sync)
+                        : 'Never'}
+                    </p>
+                    {item.last_error_code && (
+                      <p className="text-xs text-destructive">
+                        Error: {item.last_error_code} (retries: {item.error_count})
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              <Separator />
+
+              {/* Accounts under institutions */}
+              <div>
+                <h4 className="mb-3 text-sm font-medium">Accounts</h4>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {accounts.map((acct) => {
+                    const Icon = accountTypeIcon[acct.type] ?? CircleDot;
+                    return (
+                      <div key={acct.id} className="flex items-center gap-3 rounded-lg border p-3">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-muted">
+                          <Icon className="h-4 w-4 text-muted-foreground" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium leading-none truncate">{acct.name}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {acct.type}{acct.subtype ? ` · ${acct.subtype}` : ''}{' '}
+                            {maskAccount(acct.mask, '')}
+                          </p>
+                        </div>
+                        <p className="text-sm font-semibold tabular-nums">
+                          {acct.current_balance != null
+                            ? formatCurrency(Number(acct.current_balance))
+                            : '--'}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Entities */}
+      {entities.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Entities</CardTitle>
+            <CardDescription>Business and personal entities.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              {entities.map((entity) => (
+                <div key={entity.id} className="rounded-lg border p-4">
+                  <p className="font-medium">{entity.name}</p>
+                  <Badge variant="secondary" className="mt-1">
+                    {entity.type}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
   );
+}
+
+function ConnectionBadge({ status }: { status: string }) {
+  const config: Record<string, { variant: 'success' | 'warning' | 'danger' | 'secondary'; label: string }> = {
+    connected: { variant: 'success', label: 'Connected' },
+    degraded: { variant: 'warning', label: 'Degraded' },
+    disconnected: { variant: 'danger', label: 'Disconnected' },
+    reauth_required: { variant: 'warning', label: 'Reauth Required' },
+  };
+
+  const { variant, label } = config[status] ?? { variant: 'secondary' as const, label: status };
+
+  return <Badge variant={variant}>{label}</Badge>;
 }

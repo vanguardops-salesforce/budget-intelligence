@@ -3,6 +3,13 @@
 import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 
+interface LinkedAccount {
+  id: string;
+  name: string;
+  mask: string | null;
+  type: string;
+}
+
 interface PlaidLinkProps {
   entities: Array<{ id: string; name: string; type: string }>;
 }
@@ -23,6 +30,8 @@ export function PlaidLink({ entities }: PlaidLinkProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [newAccounts, setNewAccounts] = useState<LinkedAccount[]>([]);
+  const [assigningEntity, setAssigningEntity] = useState<Record<string, string>>({});
   const router = useRouter();
 
   const handleConnect = useCallback(async () => {
@@ -76,9 +85,25 @@ export function PlaidLink({ entities }: PlaidLinkProps) {
       }
 
       const exchangeData = await exchangeRes.json();
-      setSuccess(`Connected ${exchangeData.institution_name || 'account'} successfully!`);
+      setSuccess(`Connected ${exchangeData.institution_name || 'account'} successfully! Assign accounts to entities below.`);
 
-      // Refresh the page to show the new connection
+      // Fetch the newly created accounts for entity assignment
+      try {
+        const acctRes = await fetch(`/api/accounts/by-plaid-item?plaid_item_id=${exchangeData.plaid_item_id}`);
+        if (acctRes.ok) {
+          const acctData = await acctRes.json();
+          setNewAccounts(acctData.accounts ?? []);
+          // Initialize all to the selected entity
+          const initialAssignments: Record<string, string> = {};
+          for (const acct of acctData.accounts ?? []) {
+            initialAssignments[acct.id] = selectedEntity;
+          }
+          setAssigningEntity(initialAssignments);
+        }
+      } catch {
+        // Non-fatal — user can still assign later from the dashboard
+      }
+
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong.');
@@ -144,6 +169,64 @@ export function PlaidLink({ entities }: PlaidLinkProps) {
       {success && (
         <div className="rounded-md bg-green-50 p-3">
           <p className="text-sm text-green-700">{success}</p>
+        </div>
+      )}
+
+      {/* Post-link entity assignment for newly connected accounts */}
+      {newAccounts.length > 0 && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 space-y-3">
+          <div>
+            <h4 className="text-sm font-semibold text-blue-900">Assign Accounts to Entities</h4>
+            <p className="text-xs text-blue-700">
+              Choose which entity each account belongs to (Personal, Veteran Digital, VCG, etc.)
+            </p>
+          </div>
+          {newAccounts.map((acct) => (
+            <div
+              key={acct.id}
+              className="flex flex-col gap-2 rounded-md border border-blue-200 bg-white p-3 sm:flex-row sm:items-center sm:justify-between"
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium truncate">
+                  {acct.name}
+                  {acct.mask && (
+                    <span className="ml-1 text-muted-foreground">····{acct.mask}</span>
+                  )}
+                </p>
+                <p className="text-xs text-muted-foreground capitalize">{acct.type}</p>
+              </div>
+              <select
+                value={assigningEntity[acct.id] || selectedEntity}
+                onChange={async (e) => {
+                  const newEntityId = e.target.value;
+                  setAssigningEntity((prev) => ({ ...prev, [acct.id]: newEntityId }));
+                  try {
+                    await fetch('/api/accounts/assign-entity', {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ account_id: acct.id, entity_id: newEntityId }),
+                    });
+                    router.refresh();
+                  } catch {
+                    // Handled silently — user can retry
+                  }
+                }}
+                className="h-8 rounded-md border bg-background px-2 text-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+              >
+                {entities.map((entity) => (
+                  <option key={entity.id} value={entity.id}>
+                    {entity.name} ({entity.type})
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+          <button
+            onClick={() => setNewAccounts([])}
+            className="text-xs text-blue-600 hover:text-blue-800 underline"
+          >
+            Done assigning
+          </button>
         </div>
       )}
     </div>

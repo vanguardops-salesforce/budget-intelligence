@@ -13,6 +13,7 @@ import {
   Receipt,
   TrendingUp,
   MessageSquare,
+  Filter,
   LogOut,
   Menu,
   X,
@@ -36,6 +37,7 @@ const NAV_ITEMS = [
   { href: '/budget', label: 'Budget', icon: PieChart },
   { href: '/transactions', label: 'Transactions', icon: Receipt },
   { href: '/portfolio', label: 'Portfolio', icon: TrendingUp },
+  { href: '/rules', label: 'Rules', icon: Filter },
   { href: '/ai', label: 'AI Coach', icon: MessageSquare },
 ];
 

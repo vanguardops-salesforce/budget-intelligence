@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { formatCurrency, formatDate, maskAccount } from '@/lib/format';
-import { Search, ArrowUpDown, RefreshCw } from 'lucide-react';
+import { Search, ArrowUpDown, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface Transaction {
   id: string;
@@ -41,13 +41,15 @@ interface TransactionTableProps {
   transactions: Transaction[];
   accounts: Account[];
   categories: BudgetCategory[];
+  pageSize?: number;
 }
 
-export function TransactionTable({ transactions, accounts, categories }: TransactionTableProps) {
+export function TransactionTable({ transactions, accounts, categories, pageSize = 25 }: TransactionTableProps) {
   const [search, setSearch] = useState('');
   const [sortField, setSortField] = useState<'date' | 'amount'>('date');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
   const router = useRouter();
 
   const accountMap = useMemo(
@@ -84,6 +86,16 @@ export function TransactionTable({ transactions, accounts, categories }: Transac
     return result;
   }, [transactions, search, sortField, sortDir, accountMap]);
 
+  // Pagination
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedRows = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  function handleSearchChange(value: string) {
+    setSearch(value);
+    setCurrentPage(1);
+  }
+
   function toggleSort(field: 'date' | 'amount') {
     if (sortField === field) {
       setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -91,6 +103,7 @@ export function TransactionTable({ transactions, accounts, categories }: Transac
       setSortField(field);
       setSortDir('desc');
     }
+    setCurrentPage(1);
   }
 
   async function handleCategoryChange(txId: string, categoryId: string) {
@@ -121,7 +134,7 @@ export function TransactionTable({ transactions, accounts, categories }: Transac
           type="text"
           placeholder="Search by merchant, category, or account..."
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => handleSearchChange(e.target.value)}
           className="w-full rounded-lg border bg-background py-2 pl-10 pr-4 text-sm placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
         />
       </div>
@@ -132,6 +145,11 @@ export function TransactionTable({ transactions, accounts, categories }: Transac
           {filtered.length} transaction{filtered.length !== 1 ? 's' : ''}
           {search && ` matching "${search}"`}
         </p>
+        {totalPages > 1 && (
+          <p className="text-xs text-muted-foreground">
+            Page {safePage} of {totalPages}
+          </p>
+        )}
       </div>
 
       {/* Table */}
@@ -144,7 +162,7 @@ export function TransactionTable({ transactions, accounts, categories }: Transac
           </p>
         </div>
       ) : (
-        <div className="rounded-lg border">
+        <div className="rounded-lg border overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow>
@@ -172,7 +190,7 @@ export function TransactionTable({ transactions, accounts, categories }: Transac
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((tx) => {
+              {paginatedRows.map((tx) => {
                 const account = accountMap.get(tx.account_id);
                 const userCategory = tx.user_category_id
                   ? categoryMap.get(tx.user_category_id)
@@ -186,11 +204,11 @@ export function TransactionTable({ transactions, accounts, categories }: Transac
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
-                        <span className="font-medium">
+                        <span className="font-medium truncate max-w-[150px] sm:max-w-none">
                           {tx.merchant_name ?? 'Unknown'}
                         </span>
                         {tx.is_recurring && (
-                          <Badge variant="secondary" className="text-[10px]">
+                          <Badge variant="secondary" className="text-[10px] shrink-0">
                             <RefreshCw className="mr-1 h-2.5 w-2.5" />
                             recurring
                           </Badge>
@@ -200,7 +218,7 @@ export function TransactionTable({ transactions, accounts, categories }: Transac
                     <TableCell className="hidden text-muted-foreground sm:table-cell">
                       {account
                         ? `${account.name} ${maskAccount(account.mask, '')}`
-                        : '—'}
+                        : '\u2014'}
                     </TableCell>
                     <TableCell>
                       <select
@@ -238,6 +256,50 @@ export function TransactionTable({ transactions, accounts, categories }: Transac
               })}
             </TableBody>
           </Table>
+        </div>
+      )}
+
+      {/* Pagination controls */}
+      {totalPages > 1 && (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between pt-2">
+          <p className="text-xs text-muted-foreground">
+            Showing {(safePage - 1) * pageSize + 1}–{Math.min(safePage * pageSize, filtered.length)} of {filtered.length}
+          </p>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setCurrentPage(1)}
+              disabled={safePage <= 1}
+              className="rounded-md border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
+            >
+              First
+            </button>
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={safePage <= 1}
+              className="flex items-center rounded-md border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Prev</span>
+            </button>
+            <span className="px-2 text-xs font-medium tabular-nums">
+              {safePage} / {totalPages}
+            </span>
+            <button
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={safePage >= totalPages}
+              className="flex items-center rounded-md border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
+            >
+              <span className="hidden sm:inline">Next</span>
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setCurrentPage(totalPages)}
+              disabled={safePage >= totalPages}
+              className="rounded-md border px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
+            >
+              Last
+            </button>
+          </div>
         </div>
       )}
     </div>

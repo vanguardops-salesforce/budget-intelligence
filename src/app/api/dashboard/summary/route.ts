@@ -20,7 +20,7 @@ export async function GET() {
     const today = now.toISOString().split('T')[0];
 
     // Run all queries in parallel
-    const [accountsRes, txRes, holdingsRes, plaidItemsRes] = await Promise.all([
+    const [accountsRes, txRes, holdingsRes, plaidItemsRes, recurringRes] = await Promise.all([
       supabase
         .from('accounts')
         .select('id, name, type, current_balance, available_balance, mask, is_active')
@@ -39,12 +39,17 @@ export async function GET() {
       supabase
         .from('plaid_items')
         .select('id, institution_name, status, last_successful_sync, error_count'),
+      supabase
+        .from('recurring_patterns')
+        .select('estimated_amount, frequency, next_expected_date')
+        .eq('is_active', true),
     ]);
 
     const accounts = accountsRes.data ?? [];
     const transactions = txRes.data ?? [];
     const holdings = holdingsRes.data ?? [];
     const plaidItems = plaidItemsRes.data ?? [];
+    const recurringPatterns = recurringRes.data ?? [];
 
     // Calculate summary metrics
     const totalCash = accounts
@@ -78,6 +83,21 @@ export async function GET() {
     const connectedCount = plaidItems.filter((i) => i.status === 'connected').length;
     const totalConnections = plaidItems.length;
 
+    // 30-day forecast from recurring patterns
+    const forecastDate = new Date(now.getTime() + 30 * 86_400_000);
+    let forecast30d = 0;
+    for (const pattern of recurringPatterns) {
+      const amt = Number(pattern.estimated_amount) || 0;
+      const next = pattern.next_expected_date ? new Date(pattern.next_expected_date) : null;
+      if (!next || next > forecastDate) continue;
+      const freqMultiplier: Record<string, number> = { weekly: 4, biweekly: 2, monthly: 1, annual: 0 };
+      forecast30d += amt * (freqMultiplier[pattern.frequency] ?? 1);
+    }
+    if (recurringPatterns.length === 0 && mtdSpending > 0) {
+      const dayOfMonth = now.getDate();
+      forecast30d = (mtdSpending / dayOfMonth) * 30;
+    }
+
     return NextResponse.json({
       netWorth,
       totalCash,
@@ -88,6 +108,7 @@ export async function GET() {
       totalLiabilities,
       mtdSpending,
       mtdIncome,
+      forecast30d,
       connectedCount,
       totalConnections,
     });

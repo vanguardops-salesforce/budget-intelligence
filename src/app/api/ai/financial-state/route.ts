@@ -5,6 +5,7 @@ import { toClientError } from '@/lib/errors';
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit';
 import { getClientIP, writeAuditLog } from '@/lib/audit';
 import { logger } from '@/lib/logger';
+import { computeFinancialState } from '@/lib/ai/financial-intelligence';
 
 export async function GET(request: Request) {
   try {
@@ -23,14 +24,22 @@ export async function GET(request: Request) {
     }
 
     const ip = getClientIP(request.headers) ?? 'unknown';
+
+    // Compute full financial state
+    const state = await computeFinancialState(supabase, user.id);
+
     await writeAuditLog(supabase, {
       userId: user.id,
       action: 'FINANCIAL_STATE_ACCESSED',
       ipAddress: ip,
+      details: {
+        net_worth: state.net_worth.total,
+        entity_count: state.entities.length,
+        alert_count: state.alerts.length,
+      },
     });
 
-    // Phase 4: Compute and return FinancialState
-    return NextResponse.json({ error: 'Not yet implemented.' }, { status: 501 });
+    return NextResponse.json(state);
   } catch (error) {
     logger.error('Financial state error', { error_message: String(error) });
     const clientError = toClientError(error);

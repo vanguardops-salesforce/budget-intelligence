@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/sync/transactions",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 6 * * *"
     },
     {
       "path": "/api/sync/heal",

@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PlaidLink } from '@/components/plaid-link';
 import { NetWorthChart } from '@/components/net-worth-chart';

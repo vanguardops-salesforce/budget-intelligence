@@ -1,4 +1,13 @@
-export const dynamic = "force-dynamic";
+```
+
+Find the catch block at the bottom and replace:
+```
+logger.error('logger.error('create-link-token error', { error_message: String(error), response_data: JSON.stringify((error as any)?.response?.data), webhook_url: process.env.NEXT_PUBLIC_APP_URL, plaid_env: process.env.PLAID_ENV });create-link-token error', { error_message: String(error) });
+```
+
+With:
+```
+logger.error('create-link-token error', { error_message: String(error), response_data: JSON.stringify((error as any)?.response?.data), webhook_url: process.env.NEXT_PUBLIC_APP_URL, plaid_env: process.env.PLAID_ENV });export const dynamic = "force-dynamic";
 
 import { NextResponse } from 'next/server';
 import { CountryCode, Products } from 'plaid';
@@ -76,7 +85,7 @@ export async function POST(request: Request) {
       expiration: response.data.expiration,
     });
   } catch (error) {
-    logger.error('create-link-token error', { error_message: String(error) });
+    logger.error('logger.error('create-link-token error', { error_message: String(error) });create-link-token error', { error_message: String(error), response_data: (error as any)?.response?.data, webhook_url: `${process.env.NEXT_PUBLIC_APP_URL}/api/plaid/webhook`, plaid_env: process.env.PLAID_ENV });
     const clientError = toClientError(error);
     return NextResponse.json({ error: clientError.error }, { status: clientError.status });
   }

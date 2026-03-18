@@ -51,19 +51,15 @@ export async function syncTransactionsForItem(
     throw new Error(`Failed to fetch plaid_item ${plaidItemDbId}: ${itemError?.message}`);
   }
 
-  // 2. Decrypt the access token from private schema
-  const { data: tokenRow, error: tokenError } = await supabase
-    .schema('private')
-    .from('plaid_tokens')
-    .select('access_token_encrypted')
-    .eq('plaid_item_id', plaidItemDbId)
-    .single();
+  // 2. Decrypt the access token via RPC (private schema not exposed via PostgREST)
+  const { data: encryptedToken, error: tokenError } = await supabase
+    .rpc('get_plaid_token', { p_plaid_item_id: plaidItemDbId });
 
-  if (tokenError || !tokenRow) {
+  if (tokenError || !encryptedToken) {
     throw new Error(`Failed to fetch token for plaid_item ${plaidItemDbId}: ${tokenError?.message}`);
   }
 
-  const accessToken = decrypt(tokenRow.access_token_encrypted);
+  const accessToken = decrypt(encryptedToken);
 
   // 3. Build account lookup map (plaid_account_id → account UUID)
   const { data: accounts, error: acctError } = await supabase

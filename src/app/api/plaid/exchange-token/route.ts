@@ -86,14 +86,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Failed to store connection.' }, { status: 500 });
     }
 
-    // Encrypt the access token and store in private.plaid_tokens
+    // Encrypt the access token and store via RPC (private schema not exposed via PostgREST)
     const encryptedToken = encrypt(accessToken);
     const { error: tokenInsertError } = await serviceClient
-      .schema('private')
-      .from('plaid_tokens')
-      .insert({
-        plaid_item_id: plaidItemRow.id,
-        access_token_encrypted: encryptedToken,
+      .rpc('store_plaid_token', {
+        p_plaid_item_id: plaidItemRow.id,
+        p_encrypted_token: encryptedToken,
       });
 
     if (tokenInsertError) {

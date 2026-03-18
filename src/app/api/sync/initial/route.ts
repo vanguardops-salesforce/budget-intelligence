@@ -37,5 +37,27 @@ export async function GET(request: Request) {
     }
   }
 
+  // Auto-categorize new transactions using rules
+  const { error: ruleError } = await supabase.rpc('apply_transaction_rules');
+  if (ruleError) {
+    // Fallback: apply rules via direct SQL-style update
+    const { data: rules } = await supabase
+      .from('transaction_rules')
+      .select('merchant_pattern, category_id, entity_id')
+      .eq('is_active', true);
+
+    if (rules) {
+      for (const rule of rules) {
+        await supabase
+          .from('transactions')
+          .update({ user_category_id: rule.category_id })
+          .is('user_category_id', null)
+          .is('deleted_at', null)
+          .eq('entity_id', rule.entity_id)
+          .ilike('merchant_name', '%' + rule.merchant_pattern + '%');
+      }
+    }
+  }
+
   return NextResponse.json({ status: 'ok', results });
 }

@@ -46,6 +46,7 @@ interface TransactionTableProps {
 
 export function TransactionTable({ transactions, accounts, categories, pageSize = 25 }: TransactionTableProps) {
   const [search, setSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [sortField, setSortField] = useState<'date' | 'amount'>('date');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [updatingId, setUpdatingId] = useState<string | null>(null);
@@ -64,6 +65,13 @@ export function TransactionTable({ transactions, accounts, categories, pageSize 
 
   const filtered = useMemo(() => {
     let result = transactions;
+    if (categoryFilter !== 'all') {
+      if (categoryFilter === 'uncategorized') {
+        result = result.filter((tx) => !tx.user_category_id);
+      } else {
+        result = result.filter((tx) => tx.user_category_id === categoryFilter);
+      }
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       result = result.filter(
@@ -84,7 +92,7 @@ export function TransactionTable({ transactions, accounts, categories, pageSize 
         : Math.abs(a.amount) - Math.abs(b.amount);
     });
     return result;
-  }, [transactions, search, sortField, sortDir, accountMap]);
+  }, [transactions, search, sortField, sortDir, accountMap, categoryFilter]);
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -127,16 +135,29 @@ export function TransactionTable({ transactions, accounts, categories, pageSize 
 
   return (
     <div className="space-y-4">
-      {/* Search bar */}
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <input
-          type="text"
-          placeholder="Search by merchant, category, or account..."
-          value={search}
-          onChange={(e) => handleSearchChange(e.target.value)}
-          className="w-full rounded-lg border bg-background py-2 pl-10 pr-4 text-sm placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
-        />
+      {/* Search and filter */}
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <input
+            type="text"
+            placeholder="Search by merchant, category, or account..."
+            value={search}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            className="w-full rounded-lg border bg-background py-2 pl-10 pr-4 text-sm placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+        <select
+          value={categoryFilter}
+          onChange={(e) => { setCategoryFilter(e.target.value); setCurrentPage(1); }}
+          className="h-[38px] rounded-lg border bg-background px-3 text-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+        >
+          <option value="all">All Categories</option>
+          <option value="uncategorized">Uncategorized</option>
+          {categories.map((cat) => (
+            <option key={cat.id} value={cat.id}>{cat.name}</option>
+          ))}
+        </select>
       </div>
 
       {/* Results count */}

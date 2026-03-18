@@ -1,7 +1,7 @@
 {
   "crons": [
     {
-      "path": "/api/sync/transactions",
+      "path": "/api/sync/initial",
       "schedule": "0 6 * * *"
     },
     {

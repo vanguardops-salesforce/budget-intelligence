@@ -153,7 +153,32 @@ export default async function DashboardPage() {
     .filter(t => Number(t.amount) > 0 && !ccPaymentCategoryIds.includes(t.user_category_id ?? ''))
     .reduce((sum, t) => sum + Number(t.amount), 0);
 
-  const planInvestable = currentMonthlyIncome - totalMonthlyBudget;
+  // Budget breakdown by purpose
+  const taxCategories = budgetCategories.filter(c => c.name === 'Tax Payments');
+  const taxBudget = taxCategories.reduce((sum, c) => sum + Number(c.monthly_budget_amount), 0);
+  
+  const tithingCategory = budgetCategories.find(c => c.name === 'Tithing');
+  const tithingBudget = Number(tithingCategory?.monthly_budget_amount || 0);
+  
+  const vcgEntityId = '33333333-3333-3333-3333-333333333333';
+  const vdEntityId = '22222222-2222-2222-2222-222222222222';
+  
+  const rentalCostCategories = ['Mortgage Payments', 'Property Repairs & Maintenance', 'Property Insurance', 'Property Management', 'Utilities'];
+  const rentalCostsBudget = budgetCategories
+    .filter(c => c.entity_id === vcgEntityId && rentalCostCategories.includes(c.name))
+    .reduce((sum, c) => sum + Number(c.monthly_budget_amount), 0);
+  
+  const vdExpenseCategories = ['Software & SaaS', 'Professional Services', 'Office & Equipment', 'Travel & Business Meals', 'Marketing', 'Insurance', 'Miscellaneous'];
+  const vdExpensesBudget = budgetCategories
+    .filter(c => c.entity_id === vdEntityId && vdExpenseCategories.includes(c.name))
+    .reduce((sum, c) => sum + Number(c.monthly_budget_amount), 0);
+  
+  const personalLivingCategories = ['Groceries', 'Dining & Delivery', 'Shopping & Household', 'Entertainment', 'Kids & Family', 'Personal Care', 'Car Expenses', 'Transportation', 'Medical & Health', 'Subscriptions', 'Utilities & Phone', 'Housing', 'Insurance - Auto/Home', 'Miscellaneous', 'Travel & Vacation'];
+  const personalLivingBudget = budgetCategories
+    .filter(c => c.entity_id === personalEntityId && personalLivingCategories.includes(c.name))
+    .reduce((sum, c) => sum + Number(c.monthly_budget_amount), 0);
+
+  const planInvestable = currentMonthlyIncome - taxBudget - tithingBudget - rentalCostsBudget - vdExpensesBudget - personalLivingBudget;
   const actualInvestable = actualIncome - actualSpendingExCCPayments;
 
   // Credit card accounts grouped by entity
@@ -446,19 +471,35 @@ export default async function DashboardPage() {
           <CardContent>
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
               <div className="space-y-3">
-                <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">The Plan</h4>
+                <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Monthly Waterfall</h4>
                 <div className="space-y-2">
                   <div className="flex justify-between text-sm">
-                    <span>Expected Monthly Income</span>
+                    <span>Expected Income</span>
                     <span className="font-mono text-green-600">{formatCurrency(currentMonthlyIncome)}</span>
                   </div>
-                  <div className="flex justify-between text-sm">
-                    <span>Total Monthly Budget</span>
-                    <span className="font-mono text-red-600">-{formatCurrency(totalMonthlyBudget)}</span>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>Taxes (reserve)</span>
+                    <span className="font-mono">-{formatCurrency(taxBudget)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>Tithing</span>
+                    <span className="font-mono">-{formatCurrency(tithingBudget)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>Rental Property Costs</span>
+                    <span className="font-mono">-{formatCurrency(rentalCostsBudget)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>Business Expenses (VD)</span>
+                    <span className="font-mono">-{formatCurrency(vdExpensesBudget)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>Personal Living Expenses</span>
+                    <span className="font-mono">-{formatCurrency(personalLivingBudget)}</span>
                   </div>
                   <Separator />
                   <div className="flex justify-between text-sm font-bold">
-                    <span>Available to Invest</span>
+                    <span>Available to Invest/Save</span>
                     <span className={planInvestable >= 0 ? 'text-green-600 font-mono' : 'text-red-600 font-mono'}>
                       {formatCurrency(planInvestable)}
                     </span>

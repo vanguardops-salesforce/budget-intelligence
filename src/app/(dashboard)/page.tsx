@@ -39,11 +39,11 @@ export default async function DashboardPage() {
   const periodLabel = `${periodStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${periodEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 
   // Parallel data fetching
-  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, ccConfigRes, plannedRes, catTxRes] = await Promise.all([
+  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, incomeRes, ccConfigRes, plannedRes, catTxRes] = await Promise.all([
     supabase.from('entities').select('id, name, type').eq('is_active', true),
     supabase
       .from('accounts')
-      .select('id, name, type, subtype, current_balance, available_balance, mask, is_active, plaid_item_id')
+      .select('id, name, type, subtype, current_balance, available_balance, mask, is_active, plaid_item_id, entity_id')
       .eq('is_active', true)
       .is('deleted_at', null),
     supabase
@@ -68,6 +68,11 @@ export default async function DashboardPage() {
       .select('id, name, entity_id, monthly_budget_amount')
       .eq('is_active', true),
     supabase
+      .from('income_sources')
+      .select('name, type, rate_amount, rate_type, estimated_monthly, start_date, end_date, entity_id')
+      .eq('is_active', true)
+      .order('estimated_monthly', { ascending: false }),
+    supabase
       .from('credit_card_config')
       .select('account_id, credit_limit, statement_close_day, payment_due_day, notes'),
     supabase
@@ -91,6 +96,33 @@ export default async function DashboardPage() {
   const recurringPatterns = recurringRes.data ?? [];
   const budgetCategories = budgetRes.data ?? [];
   const ccConfigs = ccConfigRes.data ?? [];
+  const incomeSources = incomeRes.data ?? [];
+  
+  // Income projection
+  const activeIncome = incomeSources.filter(s => {
+    const started = !s.start_date || new Date(s.start_date) <= now;
+    const notEnded = !s.end_date || new Date(s.end_date) > now;
+    return started && notEnded;
+  });
+  const upcomingIncome = incomeSources.filter(s => {
+    return s.start_date && new Date(s.start_date) > now;
+  });
+  const endingIncome = incomeSources.filter(s => {
+    if (!s.end_date) return false;
+    const endDate = new Date(s.end_date);
+    const daysUntilEnd = Math.round((endDate.getTime() - now.getTime()) / 86400000);
+    return daysUntilEnd > 0 && daysUntilEnd <= 90;
+  });
+  
+  const currentMonthlyIncome = activeIncome.reduce((sum, s) => sum + Number(s.estimated_monthly), 0);
+  const w2Income = activeIncome.filter(s => s.type === 'w2').reduce((sum, s) => sum + Number(s.estimated_monthly), 0);
+  const income1099 = activeIncome.filter(s => s.type === '1099').reduce((sum, s) => sum + Number(s.estimated_monthly), 0);
+  const rentalIncome = activeIncome.filter(s => s.type === 'rental').reduce((sum, s) => sum + Number(s.estimated_monthly), 0);
+  
+  // Future income (after all upcoming sources start)
+  const futureMonthlyIncome = incomeSources
+    .filter(s => !s.end_date || new Date(s.end_date) > now)
+    .reduce((sum, s) => sum + Number(s.estimated_monthly), 0);
   const ccConfigMap = new Map(ccConfigs.map(c => [c.account_id, c]));
   const plannedExpenses = plannedRes.data ?? [];
   const totalPlanned = plannedExpenses.reduce((sum, p) => sum + Number(p.amount), 0);
@@ -121,14 +153,23 @@ export default async function DashboardPage() {
     .filter(t => Number(t.amount) > 0 && !ccPaymentCategoryIds.includes(t.user_category_id ?? ''))
     .reduce((sum, t) => sum + Number(t.amount), 0);
 
-  const planInvestable = actualIncome - totalMonthlyBudget;
+  const planInvestable = currentMonthlyIncome - totalMonthlyBudget;
   const actualInvestable = actualIncome - actualSpendingExCCPayments;
 
-  // Credit card accounts with details
+  // Credit card accounts grouped by entity
   const creditCards = accounts
     .filter(a => a.type === 'credit')
     .sort((a, b) => (Number(b.current_balance) || 0) - (Number(a.current_balance) || 0));
   const totalCreditBalance = creditCards.reduce((sum, c) => sum + (Number(c.current_balance) || 0), 0);
+  
+  const entityMap = new Map(entities.map(e => [e.id, e.name]));
+  const ccByEntity = new Map<string, typeof creditCards>();
+  for (const card of creditCards) {
+    const entityName = entityMap.get(card.entity_id) || 'Unknown';
+    const existing = ccByEntity.get(entityName) || [];
+    existing.push(card);
+    ccByEntity.set(entityName, existing);
+  }
 
   // Compute metrics
   const totalCash = accounts
@@ -408,8 +449,8 @@ export default async function DashboardPage() {
                 <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">The Plan</h4>
                 <div className="space-y-2">
                   <div className="flex justify-between text-sm">
-                    <span>MTD Income</span>
-                    <span className="font-mono text-green-600">{formatCurrency(actualIncome)}</span>
+                    <span>Expected Monthly Income</span>
+                    <span className="font-mono text-green-600">{formatCurrency(currentMonthlyIncome)}</span>
                   </div>
                   <div className="flex justify-between text-sm">
                     <span>Total Monthly Budget</span>
@@ -450,6 +491,115 @@ export default async function DashboardPage() {
                 <p className="text-sm text-gray-900">
                   <strong>{formatCurrency(actualInvestable)}</strong> is sitting uninvested this month.
                   {' '}Consider: tax reserve (Q1 due Apr 15), Solo 401(k), or brokerage.
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Income Projection */}
+      {hasAccounts && incomeSources.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Income Projection</CardTitle>
+            <CardDescription>
+              Expected monthly income: {formatCurrency(currentMonthlyIncome)} now → {formatCurrency(futureMonthlyIncome)} when all sources active
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Income breakdown by type */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div className="rounded-lg border p-3">
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">W-2 Income</p>
+                <p className="text-xl font-bold tabular-nums mt-1">{formatCurrency(w2Income)}</p>
+                <p className="text-xs text-muted-foreground">Taxes withheld by employer</p>
+              </div>
+              <div className="rounded-lg border p-3">
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">1099 Income</p>
+                <p className="text-xl font-bold tabular-nums mt-1">{formatCurrency(income1099)}</p>
+                <p className="text-xs text-red-600">You owe estimated taxes on this</p>
+              </div>
+              <div className="rounded-lg border p-3">
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">Rental Income</p>
+                <p className="text-xl font-bold tabular-nums mt-1">{formatCurrency(rentalIncome)}</p>
+                <p className="text-xs text-muted-foreground">Passive — VCG portfolio</p>
+              </div>
+            </div>
+
+            {/* Active sources */}
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Active Now</p>
+              <div className="space-y-2">
+                {activeIncome.map((source) => (
+                  <div key={source.name} className="flex justify-between items-center text-sm rounded-lg border p-3">
+                    <div>
+                      <span className="font-medium">{source.name}</span>
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        {source.type === 'w2' ? 'W-2' : source.type === '1099' ? '1099' : 'Rental'}
+                        {' · '}{entityMap.get(source.entity_id) || 'Unknown'}
+                      </span>
+                    </div>
+                    <span className="font-bold tabular-nums">{formatCurrency(Number(source.estimated_monthly))}/mo</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Upcoming sources */}
+            {upcomingIncome.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-green-600 uppercase tracking-wider mb-2">Starting Soon</p>
+                <div className="space-y-2">
+                  {upcomingIncome.map((source) => {
+                    const startDate = new Date(source.start_date!);
+                    const daysUntil = Math.round((startDate.getTime() - now.getTime()) / 86400000);
+                    return (
+                      <div key={source.name} className="flex justify-between items-center text-sm rounded-lg border border-green-200 bg-white p-3">
+                        <div>
+                          <span className="font-medium">{source.name}</span>
+                          <span className="ml-2 text-xs text-green-600">
+                            Starts {startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ({daysUntil} days)
+                          </span>
+                        </div>
+                        <span className="font-bold tabular-nums text-green-700">+{formatCurrency(Number(source.estimated_monthly))}/mo</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Ending sources warning */}
+            {endingIncome.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-red-600 uppercase tracking-wider mb-2">Ending Soon</p>
+                <div className="space-y-2">
+                  {endingIncome.map((source) => {
+                    const endDate = new Date(source.end_date!);
+                    const daysUntil = Math.round((endDate.getTime() - now.getTime()) / 86400000);
+                    return (
+                      <div key={source.name} className="flex justify-between items-center text-sm rounded-lg border border-red-200 bg-white p-3">
+                        <div>
+                          <span className="font-medium">{source.name}</span>
+                          <span className="ml-2 text-xs text-red-600">
+                            Ends {endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ({daysUntil} days)
+                          </span>
+                        </div>
+                        <span className="font-bold tabular-nums text-red-600">-{formatCurrency(Number(source.estimated_monthly))}/mo</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Tax warning for 1099 income */}
+            {income1099 > 10000 && (
+              <div className="rounded-lg border border-red-300 bg-white p-3">
+                <p className="text-sm text-gray-900">
+                  <strong className="text-red-600">Tax Alert:</strong> {formatCurrency(income1099)}/mo in 1099 income requires quarterly estimated payments of approximately <strong>{formatCurrency(income1099 * 0.35)}/quarter</strong>. 
+                  {' '}Without S-Corp election, you also owe ~{formatCurrency(income1099 * 0.153)}/mo in SE tax.
                 </p>
               </div>
             )}
@@ -753,8 +903,12 @@ export default async function DashboardPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="space-y-3">
-              {creditCards.map((card) => {
+            <div className="space-y-6">
+              {Array.from(ccByEntity.entries()).map(([entityName, cards]) => (
+                <div key={entityName}>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{entityName}</p>
+                  <div className="space-y-3">
+              {cards.map((card) => {
                 const config = ccConfigMap.get(card.id);
                 const balance = Number(card.current_balance) || 0;
                 const limit = config ? Number(config.credit_limit) : (balance + (Number(card.available_balance) || 0));
@@ -814,6 +968,9 @@ export default async function DashboardPage() {
                   </div>
                 );
               })}
+              </div>
+                </div>
+              ))}
               <Separator />
               <div className="flex justify-between items-center pt-1">
                 <span className="text-sm font-medium">Total Balance</span>

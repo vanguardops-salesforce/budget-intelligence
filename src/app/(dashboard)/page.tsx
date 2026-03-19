@@ -39,7 +39,7 @@ export default async function DashboardPage() {
   const periodLabel = `${periodStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${periodEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 
   // Parallel data fetching
-  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, catTxRes] = await Promise.all([
+  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, plannedRes, catTxRes] = await Promise.all([
     supabase.from('entities').select('id, name, type').eq('is_active', true),
     supabase
       .from('accounts')
@@ -68,6 +68,11 @@ export default async function DashboardPage() {
       .select('id, name, entity_id, monthly_budget_amount')
       .eq('is_active', true),
     supabase
+      .from('planned_expenses')
+      .select('id, name, amount, expected_date, notes, is_completed, entity_id')
+      .eq('is_completed', false)
+      .order('expected_date', { ascending: true }),
+    supabase
       .from('transactions')
       .select('amount, user_category_id, entity_id, merchant_name, date')
       .is('deleted_at', null)
@@ -82,6 +87,8 @@ export default async function DashboardPage() {
   const holdings = holdingsRes.data ?? [];
   const recurringPatterns = recurringRes.data ?? [];
   const budgetCategories = budgetRes.data ?? [];
+  const plannedExpenses = plannedRes.data ?? [];
+  const totalPlanned = plannedExpenses.reduce((sum, p) => sum + Number(p.amount), 0);
   const allMtdTransactions = catTxRes.data ?? [];
 
   // Investable Cash Calculations
@@ -198,8 +205,12 @@ export default async function DashboardPage() {
   const projectedSpending = monthPct > 0 ? actualSpendingExCCPayments / monthPct : 0;
   const budgetPace = totalMonthlyBudget > 0 ? Math.round((projectedSpending / totalMonthlyBudget) * 100) : 0;
 
-  // Emergency Fund check
-  const emergencyTarget = totalMonthlyBudget * 6;
+  // Emergency Fund check — essential personal expenses only
+  const essentialCategories = ['Groceries', 'Housing', 'Utilities & Phone', 'Transportation', 'Insurance - Auto/Home', 'Medical & Health', 'Dining & Delivery', 'Kids & Family'];
+  const essentialMonthly = budgetCategories
+    .filter(c => essentialCategories.includes(c.name) && c.entity_id === personalEntityId)
+    .reduce((sum, c) => sum + Number(c.monthly_budget_amount), 0);
+  const emergencyTarget = essentialMonthly * 6;
   const citiSavings = accounts.find(a => a.name?.includes('Accelerate'));
   const emergencyBalance = Number(citiSavings?.current_balance || 0);
   const emergencyPct = emergencyTarget > 0 ? Math.round((emergencyBalance / emergencyTarget) * 100) : 0;
@@ -633,6 +644,50 @@ export default async function DashboardPage() {
                 </p>
               </div>
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Upcoming Planned Expenses */}
+      {hasAccounts && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Upcoming Expenses</CardTitle>
+            <CardDescription>
+              Known upcoming expenses — {plannedExpenses.length} pending, totaling {formatCurrency(totalPlanned)}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {plannedExpenses.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No upcoming expenses planned. Add them in the database to track here.</p>
+            ) : (
+              <div className="space-y-3">
+                {plannedExpenses.map((expense) => {
+                  const daysUntil = Math.round((new Date(expense.expected_date).getTime() - now.getTime()) / 86400000);
+                  const isUrgent = daysUntil <= 14;
+                  const isPast = daysUntil < 0;
+                  return (
+                    <div key={expense.id} className={`flex flex-col gap-2 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between ${isPast ? 'border-red-300' : isUrgent ? 'border-yellow-300' : ''}`}>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium">{expense.name}</p>
+                          {isPast && <Badge variant="danger">Overdue</Badge>}
+                          {!isPast && isUrgent && <Badge variant="warning">{daysUntil} days</Badge>}
+                          {!isPast && !isUrgent && <Badge variant="secondary">{daysUntil} days</Badge>}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Due: {new Date(expense.expected_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                          {expense.notes ? ` — ${expense.notes}` : ''}
+                        </p>
+                      </div>
+                      <p className={`text-lg font-bold tabular-nums ${isPast ? 'text-red-600' : ''}`}>
+                        {formatCurrency(Number(expense.amount))}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

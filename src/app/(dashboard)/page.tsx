@@ -29,7 +29,7 @@ export default async function DashboardPage() {
   const today = now.toISOString().split('T')[0];
 
   // Parallel data fetching
-  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes] = await Promise.all([
+  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, catTxRes] = await Promise.all([
     supabase.from('entities').select('id, name, type').eq('is_active', true),
     supabase
       .from('accounts')
@@ -53,6 +53,16 @@ export default async function DashboardPage() {
       .from('recurring_patterns')
       .select('estimated_amount, frequency, next_expected_date')
       .eq('is_active', true),
+    supabase
+      .from('budget_categories')
+      .select('id, name, entity_id, monthly_budget_amount')
+      .eq('is_active', true),
+    supabase
+      .from('transactions')
+      .select('amount, user_category_id, entity_id, merchant_name, date')
+      .is('deleted_at', null)
+      .gte('date', monthStart)
+      .lte('date', today),
   ]);
 
   const entities = entitiesRes.data ?? [];
@@ -61,6 +71,42 @@ export default async function DashboardPage() {
   const transactions = txRes.data ?? [];
   const holdings = holdingsRes.data ?? [];
   const recurringPatterns = recurringRes.data ?? [];
+  const budgetCategories = budgetRes.data ?? [];
+  const allMtdTransactions = catTxRes.data ?? [];
+
+  // Investable Cash Calculations
+  const personalEntityId = entities.find(e => e.type === 'personal')?.id;
+  
+  // Plan-based: Income budget minus expense budgets
+  const expenseBudgets = budgetCategories.filter(
+    c => c.name !== 'Income' && c.name !== 'Credit Card Payments' && Number(c.monthly_budget_amount) > 0
+  );
+  const totalMonthlyBudget = expenseBudgets.reduce((sum, c) => sum + Number(c.monthly_budget_amount), 0);
+  
+  // Actual-based: Real income minus real spending this month
+  const actualIncome = allMtdTransactions
+    .filter(t => Number(t.amount) < 0)
+    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+  const actualExpenses = allMtdTransactions
+    .filter(t => Number(t.amount) > 0)
+    .reduce((sum, t) => sum + Number(t.amount), 0);
+  
+  // Credit card payment transactions (transfers, not real expenses)
+  const ccPaymentCategoryIds = budgetCategories
+    .filter(c => c.name === 'Credit Card Payments')
+    .map(c => c.id);
+  const actualSpendingExCCPayments = allMtdTransactions
+    .filter(t => Number(t.amount) > 0 && !ccPaymentCategoryIds.includes(t.user_category_id ?? ''))
+    .reduce((sum, t) => sum + Number(t.amount), 0);
+
+  const planInvestable = actualIncome - totalMonthlyBudget;
+  const actualInvestable = actualIncome - actualSpendingExCCPayments;
+
+  // Credit card accounts with details
+  const creditCards = accounts
+    .filter(a => a.type === 'credit')
+    .sort((a, b) => (Number(b.current_balance) || 0) - (Number(a.current_balance) || 0));
+  const totalCreditBalance = creditCards.reduce((sum, c) => sum + (Number(c.current_balance) || 0), 0);
 
   // Compute metrics
   const totalCash = accounts
@@ -230,6 +276,122 @@ export default async function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Investable Cash */}
+      {hasAccounts && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Investable Cash</CardTitle>
+            <CardDescription>
+              How much is available to invest this month — planned vs actual
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+              <div className="space-y-3">
+                <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">The Plan</h4>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span>MTD Income</span>
+                    <span className="font-mono text-green-600">{formatCurrency(actualIncome)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span>Total Monthly Budget</span>
+                    <span className="font-mono text-red-600">-{formatCurrency(totalMonthlyBudget)}</span>
+                  </div>
+                  <Separator />
+                  <div className="flex justify-between text-sm font-bold">
+                    <span>Available to Invest</span>
+                    <span className={planInvestable >= 0 ? 'text-green-600 font-mono' : 'text-red-600 font-mono'}>
+                      {formatCurrency(planInvestable)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-3">
+                <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Reality</h4>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span>MTD Income</span>
+                    <span className="font-mono text-green-600">{formatCurrency(actualIncome)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span>Actual Spending (ex. CC payments)</span>
+                    <span className="font-mono text-red-600">-{formatCurrency(actualSpendingExCCPayments)}</span>
+                  </div>
+                  <Separator />
+                  <div className="flex justify-between text-sm font-bold">
+                    <span>Actually Available</span>
+                    <span className={actualInvestable >= 0 ? 'text-green-600 font-mono' : 'text-red-600 font-mono'}>
+                      {formatCurrency(actualInvestable)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {actualInvestable > 5000 && (
+              <div className="mt-4 rounded-lg bg-green-50 dark:bg-green-950/20 p-3">
+                <p className="text-sm text-green-800 dark:text-green-200">
+                  <strong>{formatCurrency(actualInvestable)}</strong> is sitting uninvested this month.
+                  {' '}Consider: tax reserve (Q1 due Apr 15), Solo 401(k), or brokerage.
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Credit Card Intelligence */}
+      {creditCards.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Credit Cards</CardTitle>
+            <CardDescription>
+              Current balances — pay in full before statement close for 0% utilization
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {creditCards.map((card) => {
+                const balance = Number(card.current_balance) || 0;
+                const availableCredit = Number(card.available_balance) || 0;
+                const limit = balance + availableCredit;
+                const utilization = limit > 0 ? Math.round((balance / limit) * 100) : 0;
+                return (
+                  <div key={card.id} className="flex flex-col gap-2 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <CreditCard className="h-4 w-4 text-muted-foreground" />
+                        <p className="text-sm font-medium">{card.name}</p>
+                        <span className="text-xs text-muted-foreground">{maskAccount(card.mask, '')}</span>
+                      </div>
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                        <span>Limit: {formatCurrency(limit)}</span>
+                        <span>Utilization: {utilization}%</span>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className={`text-lg font-bold tabular-nums ${balance > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                        {formatCurrency(balance)}
+                      </p>
+                      {balance > 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Available: {formatCurrency(availableCredit)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+              <Separator />
+              <div className="flex justify-between items-center pt-1">
+                <span className="text-sm font-medium">Total Balance</span>
+                <span className="text-lg font-bold tabular-nums text-red-600">{formatCurrency(totalCreditBalance)}</span>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Net Worth Trend & Cash Flow Forecast */}
       {hasAccounts && (

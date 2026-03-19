@@ -1,5 +1,6 @@
 export const dynamic = "force-dynamic";
 
+import Link from 'next/link';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PlaidLink } from '@/components/plaid-link';
 import { NetWorthChart } from '@/components/net-worth-chart';
@@ -25,8 +26,17 @@ export default async function DashboardPage() {
   const supabase = createServerSupabaseClient();
 
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+  // Budget period: 15th to 14th
+  const day = now.getDate();
+  const periodStart = day >= 15
+    ? new Date(now.getFullYear(), now.getMonth(), 15)
+    : new Date(now.getFullYear(), now.getMonth() - 1, 15);
+  const periodEnd = day >= 15
+    ? new Date(now.getFullYear(), now.getMonth() + 1, 14)
+    : new Date(now.getFullYear(), now.getMonth(), 14);
+  const monthStart = periodStart.toISOString().split('T')[0];
   const today = now.toISOString().split('T')[0];
+  const periodLabel = `${periodStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${periodEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 
   // Parallel data fetching
   const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, catTxRes] = await Promise.all([
@@ -157,6 +167,50 @@ export default async function DashboardPage() {
     forecast30d = dailyRate * 30;
   }
 
+  // Spending Intelligence
+  const subscriptionCategoryId = budgetCategories.find(c => c.name === 'Subscriptions' && c.entity_id === personalEntityId)?.id;
+  const subscriptionTxns = allMtdTransactions.filter(t => t.user_category_id === subscriptionCategoryId && Number(t.amount) > 0);
+  const subscriptionTotal = subscriptionTxns.reduce((sum, t) => sum + Number(t.amount), 0);
+
+  // Budget vs actual by category (expenses only, personal)
+  const overBudgetCategories = budgetCategories
+    .filter(c => c.name !== 'Income' && c.name !== 'Credit Card Payments' && Number(c.monthly_budget_amount) > 0)
+    .map(c => {
+      const spent = allMtdTransactions
+        .filter(t => t.user_category_id === c.id && Number(t.amount) > 0)
+        .reduce((sum, t) => sum + Number(t.amount), 0);
+      const budget = Number(c.monthly_budget_amount);
+      const pct = budget > 0 ? Math.round((spent / budget) * 100) : 0;
+      return { id: c.id, name: c.name, spent, budget, pct, over: spent > budget };
+    })
+    .filter(c => c.spent > 0)
+    .sort((a, b) => b.pct - a.pct);
+
+  const categoriesOverBudget = overBudgetCategories.filter(c => c.over);
+  const categoriesNearBudget = overBudgetCategories.filter(c => !c.over && c.pct >= 70);
+
+  // Spending pace: are we on track?
+  const periodDays = Math.round((periodEnd.getTime() - periodStart.getTime()) / 86400000);
+  const elapsedDays = Math.round((now.getTime() - periodStart.getTime()) / 86400000);
+  const dayOfMonth = elapsedDays;
+  const daysInMonth = periodDays;
+  const monthPct = elapsedDays / periodDays;
+  const projectedSpending = monthPct > 0 ? actualSpendingExCCPayments / monthPct : 0;
+  const budgetPace = totalMonthlyBudget > 0 ? Math.round((projectedSpending / totalMonthlyBudget) * 100) : 0;
+
+  // Emergency Fund check
+  const emergencyTarget = totalMonthlyBudget * 6;
+  const citiSavings = accounts.find(a => a.name?.includes('Accelerate'));
+  const emergencyBalance = Number(citiSavings?.current_balance || 0);
+  const emergencyPct = emergencyTarget > 0 ? Math.round((emergencyBalance / emergencyTarget) * 100) : 0;
+
+  // Tax reserve check
+  const quarterlyTaxTarget = 17000;
+  const taxPaymentCategoryIds = budgetCategories.filter(c => c.name === 'Tax Payments').map(c => c.id);
+  const ytdTaxPayments = allMtdTransactions
+    .filter(t => taxPaymentCategoryIds.includes(t.user_category_id ?? '') && Number(t.amount) > 0)
+    .reduce((sum, t) => sum + Number(t.amount), 0);
+
   const hasAccounts = accounts.length > 0;
 
   // Latest sync timestamp across all institutions
@@ -180,7 +234,7 @@ export default async function DashboardPage() {
         <div>
           <h2 className="text-2xl font-bold tracking-tight">Overview</h2>
           <p className="text-muted-foreground">
-            Your financial snapshot at a glance.
+            Budget period: {periodLabel}
           </p>
         </div>
         {latestSync && (
@@ -330,13 +384,255 @@ export default async function DashboardPage() {
               </div>
             </div>
             {actualInvestable > 5000 && (
-              <div className="mt-4 rounded-lg bg-green-50 dark:bg-green-950/20 p-3">
-                <p className="text-sm text-green-800 dark:text-green-200">
+              <div className="mt-4 rounded-lg border border-green-300 bg-white p-3">
+                <p className="text-sm text-gray-900">
                   <strong>{formatCurrency(actualInvestable)}</strong> is sitting uninvested this month.
                   {' '}Consider: tax reserve (Q1 due Apr 15), Solo 401(k), or brokerage.
                 </p>
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Spending Intelligence */}
+      {hasAccounts && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Spending Intelligence</CardTitle>
+            <CardDescription>Auto-detected insights from your transaction data</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Spending pace */}
+            <div className="rounded-lg border p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">Monthly Spending Pace</p>
+                  <p className="text-xs text-muted-foreground">
+                    {Math.round(monthPct * 100)}% through the month
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className={`text-lg font-bold tabular-nums ${budgetPace > 100 ? 'text-red-600' : 'text-green-600'}`}>
+                    {budgetPace}%
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Projected: {formatCurrency(projectedSpending)}
+                  </p>
+                </div>
+              </div>
+              {budgetPace > 110 && (
+                <p className="mt-2 text-xs text-red-600">
+                  At this pace you will exceed your {formatCurrency(totalMonthlyBudget)} monthly budget by {formatCurrency(projectedSpending - totalMonthlyBudget)}.
+                </p>
+              )}
+            </div>
+
+            {/* Over budget alerts */}
+            {categoriesOverBudget.length > 0 && (
+              <div className="rounded-lg border border-red-300 bg-white p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <AlertTriangle className="h-4 w-4 text-red-600" />
+                  <p className="text-sm font-semibold text-red-600">Over Budget ({categoriesOverBudget.length})</p>
+                </div>
+                <div className="space-y-1">
+                  {categoriesOverBudget.map(c => (
+                    <div key={c.name} className="flex justify-between text-sm">
+                      <Link href={`/transactions?category=${c.id}`} className="text-gray-900 underline hover:text-red-600">{c.name}</Link>
+                      <span className="font-mono text-red-600">
+                        {formatCurrency(c.spent)} / {formatCurrency(c.budget)} ({c.pct}%)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Near budget warnings */}
+            {categoriesNearBudget.length > 0 && (
+              <div className="rounded-lg border border-yellow-300 bg-white p-4">
+                <p className="text-sm font-semibold text-yellow-600 mb-2">Approaching Budget ({categoriesNearBudget.length})</p>
+                <div className="space-y-1">
+                  {categoriesNearBudget.map(c => (
+                    <div key={c.name} className="flex justify-between text-sm">
+                      <Link href={`/transactions?category=${c.id}`} className="text-gray-900 underline hover:text-yellow-600">{c.name}</Link>
+                      <span className="font-mono text-yellow-600">
+                        {formatCurrency(c.spent)} / {formatCurrency(c.budget)} ({c.pct}%)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Subscription audit */}
+            <div className="rounded-lg border p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">Subscription Spend (MTD)</p>
+                  <p className="text-xs text-muted-foreground">{subscriptionTxns.length} recurring charges detected</p>
+                </div>
+                <p className="text-lg font-bold tabular-nums">{formatCurrency(subscriptionTotal)}</p>
+              </div>
+              {subscriptionTotal > 400 && (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  That is {formatCurrency(subscriptionTotal * 12)}/year in subscriptions. Consider auditing for unused services.
+                </p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Investment Waterfall */}
+      {hasAccounts && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Where Should Your Next Dollar Go?</CardTitle>
+            <CardDescription>
+              Prioritized investment waterfall — work top to bottom
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {/* Step 1: Emergency Fund */}
+              <div className={`rounded-lg border p-4 ${emergencyPct >= 100 ? 'border-green-300 bg-white' : 'border-red-300 bg-white'}`}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">1</span>
+                      <p className="text-sm font-semibold">Emergency Fund</p>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">Target: 6 months expenses ({formatCurrency(emergencyTarget)})</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-lg font-bold tabular-nums">{formatCurrency(emergencyBalance)}</p>
+                    <p className="text-xs text-muted-foreground">{emergencyPct}% funded</p>
+                  </div>
+                </div>
+                {emergencyPct < 100 && (
+                  <p className="mt-2 text-xs font-medium text-red-600">
+                    Gap: {formatCurrency(emergencyTarget - emergencyBalance)} — fund this before investing elsewhere
+                  </p>
+                )}
+              </div>
+
+              {/* Step 2: Tax Reserves */}
+              <div className="rounded-lg border border-red-300 bg-white p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-white text-xs font-bold">2</span>
+                      <p className="text-sm font-semibold">Q1 Tax Reserve</p>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">Estimated quarterly payment due April 15</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-lg font-bold tabular-nums text-red-600">{formatCurrency(quarterlyTaxTarget)}</p>
+                    <p className="text-xs text-red-600 font-medium">27 days left</p>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs font-medium text-red-600">
+                  ACTION REQUIRED: Open HYSA and set aside {formatCurrency(quarterlyTaxTarget)} before April 15.
+                  Underpayment penalties are automatic.
+                </p>
+              </div>
+
+              {/* Step 3: S-Corp Election */}
+              <div className="rounded-lg border border-yellow-300 bg-white p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-yellow-500 text-white text-xs font-bold">3</span>
+                      <p className="text-sm font-semibold">S-Corp Election</p>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">Estimated annual savings: $35K–$87K in SE tax</p>
+                  </div>
+                  <div className="text-right">
+                    <Badge variant="warning">Not Filed</Badge>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-yellow-600">
+                  Requires CPA engagement. This is the single highest-ROI financial move available to you right now.
+                </p>
+              </div>
+
+              {/* Step 4: Solo 401(k) */}
+              <div className="rounded-lg border p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">4</span>
+                      <p className="text-sm font-semibold">Solo 401(k)</p>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">Max $69,000/year (2025). Requires S-Corp first.</p>
+                  </div>
+                  <div className="text-right">
+                    <Badge variant="secondary">Not Set Up</Badge>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Once S-Corp is elected, open a Solo 401(k) at Fidelity or Schwab. Employee + employer contributions up to $69K/year tax-deferred.
+                </p>
+              </div>
+
+              {/* Step 5: Backdoor Roth IRA */}
+              <div className="rounded-lg border p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">5</span>
+                      <p className="text-sm font-semibold">Backdoor Roth IRA</p>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">$7,000/year per person ($14,000 for you + wife)</p>
+                  </div>
+                  <div className="text-right">
+                    <Badge variant="secondary">Unknown</Badge>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Your income exceeds direct Roth IRA limits. Use the backdoor method: contribute to Traditional IRA, then convert. Consult CPA first.
+                </p>
+              </div>
+
+              {/* Step 6: Taxable Brokerage */}
+              <div className="rounded-lg border p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">6</span>
+                      <p className="text-sm font-semibold">Taxable Brokerage</p>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">No limits. Index funds (VTI/VXUS) for long-term growth.</p>
+                  </div>
+                  <div className="text-right">
+                    <Badge variant="secondary">Not Set Up</Badge>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  After maxing tax-advantaged accounts, invest excess here. Low-cost index funds. This is where your idle {formatCurrency(totalCash)} starts working for you.
+                </p>
+              </div>
+
+              {/* Step 7: Business Acquisition Fund */}
+              <div className="rounded-lg border p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">7</span>
+                      <p className="text-sm font-semibold">Business Acquisition Fund</p>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">Laundromats, self-storage, car washes via Kingdom Laundromats LLC</p>
+                  </div>
+                  <div className="text-right">
+                    <Badge variant="secondary">Sourcing</Badge>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Keep a dedicated acquisition fund. Target: $50K–$100K liquid for down payments. VCI is actively sourcing deals.
+                </p>
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}

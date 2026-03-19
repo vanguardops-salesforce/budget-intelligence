@@ -42,11 +42,12 @@ interface TransactionTableProps {
   accounts: Account[];
   categories: BudgetCategory[];
   pageSize?: number;
+  initialCategory?: string;
 }
 
-export function TransactionTable({ transactions, accounts, categories, pageSize = 25 }: TransactionTableProps) {
+export function TransactionTable({ transactions, accounts, categories, pageSize = 25, initialCategory }: TransactionTableProps) {
   const [search, setSearch] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  const [categoryFilter, setCategoryFilter] = useState<string>(initialCategory || 'all');
   const [sortField, setSortField] = useState<'date' | 'amount'>('date');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [updatingId, setUpdatingId] = useState<string | null>(null);

@@ -6,7 +6,7 @@ import { TransactionTable } from '@/components/transaction-table';
 import { formatCurrency, formatRelativeTime } from '@/lib/format';
 import { Receipt, ArrowDownLeft, ArrowUpRight, Clock } from 'lucide-react';
 
-export default async function TransactionsPage() {
+export default async function TransactionsPage({ searchParams }: { searchParams: { category?: string } }) {
   const supabase = createServerSupabaseClient();
 
   const [transactionsRes, accountsRes, categoriesRes, plaidItemsRes] = await Promise.all([
@@ -112,6 +112,7 @@ export default async function TransactionsPage() {
             transactions={transactions}
             accounts={accounts}
             categories={categories}
+            initialCategory={searchParams.category}
           />
         </CardContent>
       </Card>

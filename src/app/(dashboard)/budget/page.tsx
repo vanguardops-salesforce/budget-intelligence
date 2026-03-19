@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { formatCurrency, formatRelativeTime } from '@/lib/format';
+import { BudgetRow } from '@/components/budget-row';
 import { PieChart, AlertTriangle, CheckCircle2, Clock } from 'lucide-react';
 
 export default async function BudgetPage() {
@@ -202,46 +203,17 @@ export default async function BudgetPage() {
               <CardContent>
                 <div className="space-y-6">
                   {rows.map((row) => (
-                    <div key={row.id} className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{row.name}</span>
-                          {row.overBudget && (
-                            <Badge variant="danger" className="text-[10px]">Over</Badge>
-                          )}
-                        </div>
-                        <div className="text-right">
-                          <span className="text-sm font-semibold tabular-nums">
-                            {formatCurrency(row.spent)}
-                          </span>
-                          <span className="text-sm text-muted-foreground">
-                            {' / '}{row.budget > 0 ? formatCurrency(row.budget) : 'No budget'}
-                          </span>
-                        </div>
-                      </div>
-                      <Progress
-                        value={row.pct}
-                        className="h-2.5"
-                        indicatorClassName={
-                          row.overBudget
-                            ? 'bg-destructive'
-                            : row.pct > 80
-                            ? 'bg-yellow-500'
-                            : 'bg-green-500'
-                        }
-                      />
-                      <div className="flex justify-between text-xs text-muted-foreground">
-                        <span>{row.pct}% used</span>
-                        <span>
-                          {row.remaining >= 0
-                            ? `${formatCurrency(row.remaining)} remaining`
-                            : `${formatCurrency(Math.abs(row.remaining))} over`}
-                        </span>
-                      </div>
-                      {row.rationale && (
-                        <p className="text-xs text-muted-foreground italic">{row.rationale}</p>
-                      )}
-                    </div>
+                    <BudgetRow
+                      key={row.id}
+                      id={row.id}
+                      name={row.name}
+                      spent={row.spent}
+                      budget={row.budget}
+                      pct={row.pct}
+                      remaining={row.remaining}
+                      overBudget={row.overBudget}
+                      rationale={row.rationale}
+                    />
                   ))}
                 </div>
               </CardContent>

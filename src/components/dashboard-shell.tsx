@@ -14,6 +14,7 @@ import {
   TrendingUp,
   MessageSquare,
   Zap,
+  ScanSearch,
   Wallet,
   LogOut,
   Menu,
@@ -38,9 +39,9 @@ const NAV_ITEMS = [
   { href: '/budget', label: 'Budget', icon: PieChart },
   { href: '/transactions', label: 'Transactions', icon: Receipt },
   { href: '/portfolio', label: 'Portfolio', icon: TrendingUp },
-  { href: '/quick', label: 'Quick Check', icon: Wallet },
   { href: '/quick', label: 'Quick Check', icon: Zap },
   { href: '/spending', label: 'Spending', icon: Wallet },
+  { href: '/subscriptions', label: 'Subscriptions', icon: ScanSearch },
   { href: '/ai', label: 'AI Coach', icon: MessageSquare },
 ];
 

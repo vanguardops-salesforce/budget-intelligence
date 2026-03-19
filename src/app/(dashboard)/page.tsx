@@ -39,7 +39,7 @@ export default async function DashboardPage() {
   const periodLabel = `${periodStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${periodEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 
   // Parallel data fetching
-  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, plannedRes, catTxRes] = await Promise.all([
+  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, ccConfigRes, plannedRes, catTxRes] = await Promise.all([
     supabase.from('entities').select('id, name, type').eq('is_active', true),
     supabase
       .from('accounts')
@@ -68,6 +68,9 @@ export default async function DashboardPage() {
       .select('id, name, entity_id, monthly_budget_amount')
       .eq('is_active', true),
     supabase
+      .from('credit_card_config')
+      .select('account_id, credit_limit, statement_close_day, payment_due_day, notes'),
+    supabase
       .from('planned_expenses')
       .select('id, name, amount, expected_date, notes, is_completed, entity_id')
       .eq('is_completed', false)
@@ -87,6 +90,8 @@ export default async function DashboardPage() {
   const holdings = holdingsRes.data ?? [];
   const recurringPatterns = recurringRes.data ?? [];
   const budgetCategories = budgetRes.data ?? [];
+  const ccConfigs = ccConfigRes.data ?? [];
+  const ccConfigMap = new Map(ccConfigs.map(c => [c.account_id, c]));
   const plannedExpenses = plannedRes.data ?? [];
   const totalPlanned = plannedExpenses.reduce((sum, p) => sum + Number(p.amount), 0);
   const allMtdTransactions = catTxRes.data ?? [];
@@ -222,6 +227,30 @@ export default async function DashboardPage() {
     .filter(t => taxPaymentCategoryIds.includes(t.user_category_id ?? '') && Number(t.amount) > 0)
     .reduce((sum, t) => sum + Number(t.amount), 0);
 
+  // Credit card payment alerts
+  const ccAlerts = creditCards
+    .filter(card => {
+      const config = ccConfigs.find(c => c.account_id === card.id);
+      if (!config?.statement_close_day) return false;
+      const balance = Number(card.current_balance) || 0;
+      if (balance <= 0) return false;
+      const closeDay = config.statement_close_day;
+      const thisMonth = new Date(now.getFullYear(), now.getMonth(), closeDay);
+      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, closeDay);
+      const target = thisMonth > now ? thisMonth : nextMonth;
+      const daysUntil = Math.round((target.getTime() - now.getTime()) / 86400000);
+      return daysUntil <= 7;
+    })
+    .map(card => {
+      const config = ccConfigs.find(c => c.account_id === card.id);
+      const closeDay = config!.statement_close_day;
+      const thisMonth = new Date(now.getFullYear(), now.getMonth(), closeDay);
+      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, closeDay);
+      const target = thisMonth > now ? thisMonth : nextMonth;
+      const daysUntil = Math.round((target.getTime() - now.getTime()) / 86400000);
+      return { name: card.name, mask: card.mask, balance: Number(card.current_balance), daysUntil };
+    });
+
   const hasAccounts = accounts.length > 0;
 
   // Latest sync timestamp across all institutions
@@ -255,6 +284,28 @@ export default async function DashboardPage() {
           </div>
         )}
       </div>
+
+      {/* Urgent Credit Card Alerts */}
+      {ccAlerts.length > 0 && (
+        <div className="rounded-lg border-2 border-red-400 bg-white p-4 space-y-2">
+          <div className="flex items-center gap-2">
+            <CreditCard className="h-5 w-5 text-red-600" />
+            <p className="text-sm font-bold text-red-600">PAY NOW — Statement closing soon</p>
+          </div>
+          {ccAlerts.map((alert) => (
+            <div key={alert.name} className="flex justify-between items-center text-sm">
+              <span className="text-gray-900">{alert.name} ····{alert.mask}</span>
+              <div className="text-right">
+                <span className="font-bold text-red-600 tabular-nums">{formatCurrency(alert.balance)}</span>
+                <span className="text-xs text-red-600 ml-2">{alert.daysUntil === 0 ? 'TODAY' : alert.daysUntil === 1 ? 'TOMORROW' : `${alert.daysUntil} days`}</span>
+              </div>
+            </div>
+          ))}
+          <p className="text-xs text-gray-600">
+            Pay these balances in full to report $0 utilization on your statement.
+          </p>
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
@@ -698,38 +749,67 @@ export default async function DashboardPage() {
           <CardHeader>
             <CardTitle>Credit Cards</CardTitle>
             <CardDescription>
-              Current balances — pay in full before statement close for 0% utilization
+              Pay in full before statement close for 0% utilization
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
               {creditCards.map((card) => {
+                const config = ccConfigMap.get(card.id);
                 const balance = Number(card.current_balance) || 0;
-                const availableCredit = Number(card.available_balance) || 0;
-                const limit = balance + availableCredit;
+                const limit = config ? Number(config.credit_limit) : (balance + (Number(card.available_balance) || 0));
                 const utilization = limit > 0 ? Math.round((balance / limit) * 100) : 0;
+                const closeDay = config?.statement_close_day;
+                const dueDay = config?.payment_due_day;
+
+                // Calculate days until statement close
+                let daysUntilClose = null;
+                if (closeDay) {
+                  const thisMonth = new Date(now.getFullYear(), now.getMonth(), closeDay);
+                  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, closeDay);
+                  const target = thisMonth > now ? thisMonth : nextMonth;
+                  daysUntilClose = Math.round((target.getTime() - now.getTime()) / 86400000);
+                }
+
+                const isUrgent = daysUntilClose !== null && daysUntilClose <= 5 && balance > 0;
+                const isWarning = daysUntilClose !== null && daysUntilClose <= 10 && balance > 0;
+
                 return (
-                  <div key={card.id} className="flex flex-col gap-2 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <CreditCard className="h-4 w-4 text-muted-foreground" />
-                        <p className="text-sm font-medium">{card.name}</p>
-                        <span className="text-xs text-muted-foreground">{maskAccount(card.mask, '')}</span>
+                  <div key={card.id} className={`rounded-lg border p-4 ${isUrgent ? 'border-red-300' : isWarning ? 'border-yellow-300' : ''}`}>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <CreditCard className="h-4 w-4 text-muted-foreground" />
+                          <p className="text-sm font-medium">{card.name}</p>
+                          <span className="text-xs text-muted-foreground">{maskAccount(card.mask, '')}</span>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                          <span>Limit: {formatCurrency(limit)}</span>
+                          <span>Utilization: {utilization}%</span>
+                        </div>
+                        {closeDay && (
+                          <div className="flex items-center gap-3 text-xs">
+                            <span className="text-muted-foreground">Statement closes: {closeDay}th</span>
+                            {dueDay && <span className="text-muted-foreground">Due: {dueDay}th</span>}
+                            {daysUntilClose !== null && balance > 0 && (
+                              <span className={isUrgent ? 'text-red-600 font-semibold' : isWarning ? 'text-yellow-600 font-semibold' : 'text-muted-foreground'}>
+                                {daysUntilClose} days to close
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
-                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                        <span>Limit: {formatCurrency(limit)}</span>
-                        <span>Utilization: {utilization}%</span>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className={`text-lg font-bold tabular-nums ${balance > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                        {formatCurrency(balance)}
-                      </p>
-                      {balance > 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          Available: {formatCurrency(availableCredit)}
+                      <div className="text-right">
+                        <p className={`text-lg font-bold tabular-nums ${balance > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                          {formatCurrency(balance)}
                         </p>
-                      )}
+                        {balance > 0 && isUrgent && (
+                          <p className="text-xs text-red-600 font-medium">Pay now!</p>
+                        )}
+                        {balance > 0 && isWarning && !isUrgent && (
+                          <p className="text-xs text-yellow-600 font-medium">Pay soon</p>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );

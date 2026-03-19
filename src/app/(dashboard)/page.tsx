@@ -299,6 +299,44 @@ export default async function DashboardPage() {
     .filter(t => taxPaymentCategoryIds.includes(t.user_category_id ?? '') && Number(t.amount) > 0)
     .reduce((sum, t) => sum + Number(t.amount), 0);
 
+  // Tithing tracker
+  const tithingRate = 0.10;
+  const tithingTransactions = allMtdTransactions.filter(t => {
+    const name = (t.merchant_name || '').toLowerCase();
+    return name.includes('north point') || name.includes('community ch');
+  });
+  const actualTithing = tithingTransactions
+    .filter(t => Number(t.amount) > 0)
+    .reduce((sum, t) => sum + Number(t.amount), 0);
+  
+  // Calculate expected tithe based on actual income received this period
+  const totalIncomeReceived = allMtdTransactions
+    .filter(t => Number(t.amount) < 0)
+    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+  const expectedTithe = totalIncomeReceived * tithingRate;
+  const tithingGap = expectedTithe - actualTithing;
+  
+  // By entity
+  const personalTithing = tithingTransactions
+    .filter(t => t.entity_id === personalEntityId && Number(t.amount) > 0)
+    .reduce((sum, t) => sum + Number(t.amount), 0);
+  const vdTithing = tithingTransactions
+    .filter(t => t.entity_id === '22222222-2222-2222-2222-222222222222' && Number(t.amount) > 0)
+    .reduce((sum, t) => sum + Number(t.amount), 0);
+  const vcgTithing = tithingTransactions
+    .filter(t => t.entity_id === '33333333-3333-3333-3333-333333333333' && Number(t.amount) > 0)
+    .reduce((sum, t) => sum + Number(t.amount), 0);
+
+  const personalIncome = allMtdTransactions
+    .filter(t => t.entity_id === personalEntityId && Number(t.amount) < 0)
+    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+  const vdIncome = allMtdTransactions
+    .filter(t => t.entity_id === '22222222-2222-2222-2222-222222222222' && Number(t.amount) < 0)
+    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+  const vcgIncome = allMtdTransactions
+    .filter(t => t.entity_id === '33333333-3333-3333-3333-333333333333' && Number(t.amount) < 0)
+    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+
   // Credit card payment alerts
   const ccAlerts = creditCards
     .filter(card => {
@@ -541,6 +579,99 @@ export default async function DashboardPage() {
                 </p>
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Tithing Tracker */}
+      {hasAccounts && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Tithing — 10% Commitment</CardTitle>
+            <CardDescription>
+              {tithingGap <= 0
+                ? 'You are current on your tithe this period.'
+                : `You owe ${formatCurrency(tithingGap)} more to reach 10% of income received.`}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {/* Overall progress */}
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Period Progress</span>
+                <span className="text-sm tabular-nums">
+                  {formatCurrency(actualTithing)} of {formatCurrency(expectedTithe)} ({expectedTithe > 0 ? Math.round((actualTithing / expectedTithe) * 100) : 0}%)
+                </span>
+              </div>
+              <div className="h-3 rounded-full bg-gray-100 overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${tithingGap <= 0 ? 'bg-green-500' : actualTithing / expectedTithe > 0.5 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                  style={{ width: `${Math.min(100, expectedTithe > 0 ? (actualTithing / expectedTithe) * 100 : 0)}%` }}
+                />
+              </div>
+
+              {tithingGap > 0 && (
+                <div className="rounded-lg border border-yellow-300 bg-white p-3">
+                  <p className="text-sm text-gray-900">
+                    <strong className="text-yellow-600">Gap: {formatCurrency(tithingGap)}</strong> — tithe this before your next deposit hits.
+                  </p>
+                </div>
+              )}
+
+              {/* By entity */}
+              <Separator />
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">By Entity</p>
+              <div className="space-y-2">
+                <div className="flex justify-between items-center text-sm rounded-lg border p-3">
+                  <div>
+                    <span className="font-medium">Personal</span>
+                    <span className="ml-2 text-xs text-muted-foreground">Income: {formatCurrency(personalIncome)}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold tabular-nums">{formatCurrency(personalTithing)}</span>
+                    <span className="text-xs text-muted-foreground ml-1">/ {formatCurrency(personalIncome * tithingRate)}</span>
+                    {personalTithing < personalIncome * tithingRate && personalIncome > 0 && (
+                      <p className="text-xs text-yellow-600">Gap: {formatCurrency(personalIncome * tithingRate - personalTithing)}</p>
+                    )}
+                    {personalTithing >= personalIncome * tithingRate && personalIncome > 0 && (
+                      <p className="text-xs text-green-600">Current</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex justify-between items-center text-sm rounded-lg border p-3">
+                  <div>
+                    <span className="font-medium">Veteran Digital</span>
+                    <span className="ml-2 text-xs text-muted-foreground">Income: {formatCurrency(vdIncome)}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold tabular-nums">{formatCurrency(vdTithing)}</span>
+                    <span className="text-xs text-muted-foreground ml-1">/ {formatCurrency(vdIncome * tithingRate)}</span>
+                    {vdTithing < vdIncome * tithingRate && vdIncome > 0 && (
+                      <p className="text-xs text-yellow-600">Gap: {formatCurrency(vdIncome * tithingRate - vdTithing)}</p>
+                    )}
+                    {vdTithing >= vdIncome * tithingRate && vdIncome > 0 && (
+                      <p className="text-xs text-green-600">Current</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex justify-between items-center text-sm rounded-lg border p-3">
+                  <div>
+                    <span className="font-medium">Veteran Capital Group</span>
+                    <span className="ml-2 text-xs text-muted-foreground">Income: {formatCurrency(vcgIncome)}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold tabular-nums">{formatCurrency(vcgTithing)}</span>
+                    <span className="text-xs text-muted-foreground ml-1">/ {formatCurrency(vcgIncome * tithingRate)}</span>
+                    {vcgTithing < vcgIncome * tithingRate && vcgIncome > 0 && (
+                      <p className="text-xs text-yellow-600">Gap: {formatCurrency(vcgIncome * tithingRate - vcgTithing)}</p>
+                    )}
+                    {vcgTithing >= vcgIncome * tithingRate && vcgIncome > 0 && (
+                      <p className="text-xs text-green-600">Current</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}

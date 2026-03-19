@@ -39,7 +39,7 @@ export default async function DashboardPage() {
   const periodLabel = `${periodStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${periodEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 
   // Parallel data fetching
-  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, incomeRes, ccConfigRes, plannedRes, catTxRes] = await Promise.all([
+  const [entitiesRes, accountsRes, plaidItemsRes, txRes, holdingsRes, recurringRes, budgetRes, bucketsRes, incomeRes, ccConfigRes, plannedRes, catTxRes] = await Promise.all([
     supabase.from('entities').select('id, name, type').eq('is_active', true),
     supabase
       .from('accounts')
@@ -67,6 +67,11 @@ export default async function DashboardPage() {
       .from('budget_categories')
       .select('id, name, entity_id, monthly_budget_amount')
       .eq('is_active', true),
+    supabase
+      .from('savings_buckets')
+      .select('id, name, target_amount, account_id, status, priority, notes')
+      .in('status', ['active', 'not_opened'])
+      .order('priority', { ascending: true }),
     supabase
       .from('income_sources')
       .select('name, type, rate_amount, rate_type, estimated_monthly, start_date, end_date, entity_id')
@@ -96,6 +101,7 @@ export default async function DashboardPage() {
   const recurringPatterns = recurringRes.data ?? [];
   const budgetCategories = budgetRes.data ?? [];
   const ccConfigs = ccConfigRes.data ?? [];
+  const savingsBuckets = bucketsRes.data ?? [];
   const incomeSources = incomeRes.data ?? [];
   
   // Income projection
@@ -644,6 +650,106 @@ export default async function DashboardPage() {
                 </p>
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Savings Deployment */}
+      {savingsBuckets.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Savings Deployment</CardTitle>
+            <CardDescription>
+              Three buckets — fund in priority order, top to bottom
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {savingsBuckets.map((bucket, index) => {
+                const linkedAccount = accounts.find(a => a.id === bucket.account_id);
+                const currentBalance = linkedAccount ? Number(linkedAccount.current_balance) || 0 : 0;
+                const target = Number(bucket.target_amount);
+                const pct = target > 0 ? Math.min(Math.round((currentBalance / target) * 100), 100) : 0;
+                const gap = target - currentBalance;
+                const isNotOpened = bucket.status === 'not_opened';
+                const isFunded = pct >= 100;
+
+                return (
+                  <div key={bucket.id} className={`rounded-lg border p-4 ${isNotOpened ? 'border-red-300' : isFunded ? 'border-green-300' : 'border-yellow-300'}`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">{index + 1}</span>
+                        <p className="text-sm font-semibold">{bucket.name}</p>
+                        {isNotOpened && <Badge variant="danger">Not Opened</Badge>}
+                        {!isNotOpened && isFunded && <Badge variant="success">Funded</Badge>}
+                        {!isNotOpened && !isFunded && <Badge variant="warning">{pct}%</Badge>}
+                      </div>
+                      <div className="text-right">
+                        <p className="text-lg font-bold tabular-nums">
+                          {isNotOpened ? '$0.00' : formatCurrency(currentBalance)}
+                        </p>
+                        <p className="text-xs text-muted-foreground">of {formatCurrency(target)} target</p>
+                      </div>
+                    </div>
+
+                    {/* Progress bar */}
+                    {!isNotOpened && (
+                      <div className="h-2.5 rounded-full bg-gray-100 overflow-hidden mb-2">
+                        <div
+                          className={`h-full rounded-full ${isFunded ? 'bg-green-500' : pct > 50 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    )}
+
+                    {/* Notes */}
+                    <p className="text-xs text-muted-foreground">{bucket.notes}</p>
+
+                    {/* Gap callout */}
+                    {isNotOpened && (
+                      <p className="mt-2 text-xs font-medium text-red-600">
+                        ACTION: Open this account and fund with {formatCurrency(target)}
+                      </p>
+                    )}
+                    {!isNotOpened && !isFunded && gap > 0 && (
+                      <p className="mt-2 text-xs font-medium text-yellow-600">
+                        Gap: {formatCurrency(gap)} — fund from VD checking ({formatCurrency(Number(accounts.find(a => a.mask === '7092')?.current_balance || 0))} available)
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+
+              <Separator />
+
+              {/* Redeployment plan */}
+              <div className="rounded-lg border bg-white p-4">
+                <p className="text-sm font-semibold mb-2">VD Checking Redeployment Plan</p>
+                <div className="space-y-1">
+                  <div className="flex justify-between text-sm">
+                    <span>Current VD Checking Balance</span>
+                    <span className="font-mono">{formatCurrency(Number(accounts.find(a => a.mask === '7092')?.current_balance || 0))}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>→ Tax Reserve HYSA</span>
+                    <span className="font-mono">-{formatCurrency(35000)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>→ Top up Emergency Fund</span>
+                    <span className="font-mono">-{formatCurrency(Math.max(0, 54000 - (Number(accounts.find(a => a.mask === '9300')?.current_balance || 0))))}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>→ Seed Opportunity Fund</span>
+                    <span className="font-mono">-{formatCurrency(30000)}</span>
+                  </div>
+                  <Separator />
+                  <div className="flex justify-between text-sm font-bold">
+                    <span>Remaining as Operating Cash</span>
+                    <span className="font-mono">{formatCurrency(Number(accounts.find(a => a.mask === '7092')?.current_balance || 0) - 35000 - Math.max(0, 54000 - (Number(accounts.find(a => a.mask === '9300')?.current_balance || 0))) - 30000)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}

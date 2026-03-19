@@ -15,6 +15,7 @@ import {
   MessageSquare,
   Zap,
   ScanSearch,
+  Receipt as ReceiptTax,
   Wallet,
   LogOut,
   Menu,
@@ -42,6 +43,7 @@ const NAV_ITEMS = [
   { href: '/quick', label: 'Quick Check', icon: Zap },
   { href: '/spending', label: 'Spending', icon: Wallet },
   { href: '/subscriptions', label: 'Subscriptions', icon: ScanSearch },
+  { href: '/tax', label: 'Tax Strategy', icon: ReceiptTax },
   { href: '/ai', label: 'AI Coach', icon: MessageSquare },
 ];
 

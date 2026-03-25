@@ -198,11 +198,11 @@ export default function DailyBriefing() {
 
   if (loading) {
     return (
-      <div className="rounded-lg border bg-card p-4 mb-6 animate-pulse">
-        <div className="h-5 w-48 bg-muted rounded mb-3" />
+      <div className="rounded-lg border border-zinc-700 bg-zinc-900 p-4 mb-6 animate-pulse">
+        <div className="h-5 w-48 bg-zinc-700 rounded mb-3" />
         <div className="space-y-2">
-          <div className="h-4 w-full bg-muted rounded" />
-          <div className="h-4 w-3/4 bg-muted rounded" />
+          <div className="h-4 w-full bg-zinc-700 rounded" />
+          <div className="h-4 w-3/4 bg-zinc-700 rounded" />
         </div>
       </div>
     );
@@ -217,41 +217,41 @@ export default function DailyBriefing() {
   const dueCount = data.actions.filter(a => a.status === 'due').length;
 
   return (
-    <div className="rounded-lg border bg-card mb-6 overflow-hidden">
+    <div className="rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 mb-6 overflow-hidden">
       <button
         onClick={() => setCollapsed(!collapsed)}
-        className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors text-left"
+        className="w-full flex items-center justify-between p-4 hover:bg-zinc-800 transition-colors text-left"
       >
         <div className="flex items-center gap-3">
           <span className="text-lg font-semibold tracking-tight">Daily Briefing</span>
-          <span className="text-xs text-muted-foreground font-medium">{period.label}</span>
+          <span className="text-xs text-zinc-400 font-medium">{period.label}</span>
           {overdueCount > 0 && (
-            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-900/40 text-red-400">
               {overdueCount} overdue
             </span>
           )}
           {dueCount > 0 && (
-            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-900/40 text-amber-400">
               {dueCount} due now
             </span>
           )}
           {overdueCount === 0 && dueCount === 0 && (
-            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-900/40 text-emerald-400">
               All clear
             </span>
           )}
         </div>
-        <svg className={`w-5 h-5 text-muted-foreground transition-transform ${collapsed ? '' : 'rotate-180'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <svg className={`w-5 h-5 text-zinc-400 transition-transform ${collapsed ? '' : 'rotate-180'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
 
       {!collapsed && (
         <div className="px-4 pb-4 space-y-4">
-          <div className="h-px bg-border -mx-4" />
+          <div className="h-px bg-zinc-700 -mx-4" />
 
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Tithing — 10%</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Tithing — 10%</h3>
             <div className="space-y-1.5">
               {data.titheByEntity.map((e, i) => {
                 const owed = e.incomeReceived * 0.1;
@@ -261,9 +261,9 @@ export default function DailyBriefing() {
                     <span>
                       <span className="font-medium">{e.entity}:</span>{' '}
                       {e.gap <= 0 ? (
-                        <span className="text-emerald-600 dark:text-emerald-400">Current — {fmt(e.tithePaid)} paid</span>
+                        <span className="text-emerald-400">Current — {fmt(e.tithePaid)} paid</span>
                       ) : (
-                        <span className="text-red-600 dark:text-red-400">{fmt(e.gap)} gap — {fmt(e.tithePaid)} of {fmt(owed)} paid</span>
+                        <span className="text-red-400">{fmt(e.gap)} gap — {fmt(e.tithePaid)} of {fmt(owed)} paid</span>
                       )}
                     </span>
                   </div>
@@ -272,28 +272,28 @@ export default function DailyBriefing() {
               {data.titheByEntity.length === 0 && (
                 <div className="flex items-start text-sm">
                   <StatusDot status="info" />
-                  <span className="text-muted-foreground">No income received this period yet</span>
+                  <span className="text-zinc-400">No income received this period yet</span>
                 </div>
               )}
             </div>
           </div>
 
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Income — Expected vs Received</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Income — Expected vs Received</h3>
             <div className="space-y-1.5">
               <div className="flex items-start text-sm">
                 <StatusDot status={incomePercent >= 80 ? 'good' : incomePercent >= 40 ? 'warn' : 'info'} />
                 <span>
                   <span className="font-medium">{fmt(data.receivedIncome)}</span>
-                  <span className="text-muted-foreground"> of {fmt(data.expectedIncome)} expected ({incomePercent}%)</span>
+                  <span className="text-zinc-400"> of {fmt(data.expectedIncome)} expected ({incomePercent}%)</span>
                 </span>
               </div>
               {data.incomeByEntity.map((e, i) => {
                 const pct = e.expected > 0 ? Math.round((e.received / e.expected) * 100) : 0;
                 return (
                   <div key={i} className="flex items-start text-sm pl-4">
-                    <span className="text-muted-foreground mr-1">•</span>
-                    <span>{e.entity}: {fmt(e.received)}{e.expected > 0 && <span className="text-muted-foreground"> / {fmt(e.expected)} ({pct}%)</span>}</span>
+                    <span className="text-zinc-400 mr-1">•</span>
+                    <span>{e.entity}: {fmt(e.received)}{e.expected > 0 && <span className="text-zinc-400"> / {fmt(e.expected)} ({pct}%)</span>}</span>
                   </div>
                 );
               })}
@@ -301,17 +301,17 @@ export default function DailyBriefing() {
           </div>
 
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Tax Reserve — 38% of 1099 Income</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Tax Reserve — 38% of 1099 Income</h3>
             <div className="space-y-1.5">
               {data.totalTaxReserveNeeded > 0 ? (
                 <div className="flex items-start text-sm">
                   <WarnIcon />
-                  <span><span className="font-medium">{fmt(data.totalTaxReserveNeeded)}</span><span className="text-muted-foreground"> should be in tax reserve HYSA this period</span></span>
+                  <span><span className="font-medium">{fmt(data.totalTaxReserveNeeded)}</span><span className="text-zinc-400"> should be in tax reserve HYSA this period</span></span>
                 </div>
               ) : (
                 <div className="flex items-start text-sm">
                   <StatusDot status="info" />
-                  <span className="text-muted-foreground">No 1099 income received this period yet</span>
+                  <span className="text-zinc-400">No 1099 income received this period yet</span>
                 </div>
               )}
             </div>
@@ -319,12 +319,12 @@ export default function DailyBriefing() {
 
           {data.creditCards.length > 0 && (
             <div>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Credit Cards</h3>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Credit Cards</h3>
               <div className="space-y-1.5">
                 {data.creditCards.map((cc, i) => (
                   <div key={i} className="flex items-start text-sm">
                     {cc.balance <= 0 ? <CheckIcon /> : <StatusDot status="info" />}
-                    <span><span className="font-medium">{cc.name}:</span> {cc.balance <= 0 ? <span className="text-emerald-600 dark:text-emerald-400">$0 balance</span> : <span>{fmt(cc.balance)} — pay before statement close</span>}</span>
+                    <span><span className="font-medium">{cc.name}:</span> {cc.balance <= 0 ? <span className="text-emerald-400">$0 balance</span> : <span>{fmt(cc.balance)} — pay before statement close</span>}</span>
                   </div>
                 ))}
               </div>
@@ -332,21 +332,21 @@ export default function DailyBriefing() {
           )}
 
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Retirement — $5M Target</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Retirement — $5M Target</h3>
             <div className="space-y-1.5">
               <div className="flex items-start text-sm">
                 <StatusDot status="info" />
-                <span className="text-muted-foreground">~$150K estimated · No accounts linked yet · Target: age 50–55</span>
+                <span className="text-zinc-400">~$150K estimated · No accounts linked yet · Target: age 50–55</span>
               </div>
               <div className="flex items-start text-sm pl-4">
-                <span className="text-muted-foreground mr-1">•</span>
-                <span className="text-muted-foreground">Find old TSP/401(k) accounts → Open Solo 401(k) at Fidelity → Start contributing</span>
+                <span className="text-zinc-400 mr-1">•</span>
+                <span className="text-zinc-400">Find old TSP/401(k) accounts → Open Solo 401(k) at Fidelity → Start contributing</span>
               </div>
             </div>
           </div>
 
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Action Items</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Action Items</h3>
             <div className="space-y-1.5">
               {data.actions
                 .sort((a, b) => {
@@ -357,16 +357,16 @@ export default function DailyBriefing() {
                   <div key={i} className="flex items-start text-sm">
                     {action.status === 'done' ? <CheckIcon /> : action.status === 'overdue' ? <AlertIcon /> : action.status === 'due' ? <WarnIcon /> : <StatusDot status="info" />}
                     <div>
-                      <span className={`font-medium ${action.status === 'overdue' ? 'text-red-600 dark:text-red-400' : ''}`}>{action.label}</span>
-                      <span className="text-muted-foreground ml-1">— {action.detail}</span>
+                      <span className={`font-medium ${action.status === 'overdue' ? 'text-red-400' : ''}`}>{action.label}</span>
+                      <span className="text-zinc-400 ml-1">— {action.detail}</span>
                     </div>
                   </div>
                 ))}
             </div>
           </div>
 
-          <div className="h-px bg-border -mx-4" />
-          <p className="text-xs text-muted-foreground text-center">
+          <div className="h-px bg-zinc-700 -mx-4" />
+          <p className="text-xs text-zinc-400 text-center">
             Priority: Tithe first → Tax reserve → Bills → Emergency fund → Retirement → Surplus
           </p>
         </div>

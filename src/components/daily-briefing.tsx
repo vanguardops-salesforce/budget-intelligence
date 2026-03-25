@@ -10,6 +10,7 @@ interface BriefingData {
   totalTitheOwed: number;
   totalTithePaid: number;
   titheByEntity: { entity: string; incomeReceived: number; tithePaid: number; gap: number }[];
+  tithingItems: { sourceName: string; sourceType: string; entity: string; entityId: string; date: string; income: number; titheOwed: number; paid: boolean }[];
   totalTaxReserveNeeded: number;
   creditCards: { name: string; balance: number }[];
   actions: { label: string; status: 'overdue' | 'due' | 'upcoming' | 'done'; detail: string }[];
@@ -121,46 +122,79 @@ export default function DailyBriefing() {
 
         const expectedIncome = sources.reduce((sum: number, s: any) => sum + Number(s.estimated_monthly || 0), 0);
 
-        // Build list of known income source names to match against
-        const sourceNames = sources.map((s: any) => (s.name || '').toLowerCase());
-
-        // Only count deposits that match a known income source name
-        const isIncomeTransaction = (t: any) => {
-          if (Number(t.amount) >= 0) return false;
+        // Match deposits against merchant_patterns from income_sources
+        const matchSource = (t: any) => {
           const merchant = (t.merchant_name || t.name || '').toLowerCase();
-          return sourceNames.some((sn: string) => merchant.includes(sn.toLowerCase()) || sn.toLowerCase().includes(merchant));
+          for (const s of sources) {
+            const patterns = (s.merchant_patterns || s.name || '').split(',').map((p: string) => p.trim().toLowerCase()).filter(Boolean);
+            if (patterns.some((p: string) => merchant.includes(p))) {
+              return s;
+            }
+          }
+          return null;
         };
 
-        const incomeTransactions = transactions.filter(isIncomeTransaction);
-        const receivedIncome = incomeTransactions.reduce((sum: number, t: any) => sum + Math.abs(Number(t.amount)), 0);
+        // Build individual income items with source info
+        const incomeItems: { txn: any; source: any; amount: number }[] = [];
+        for (const t of transactions) {
+          if (Number(t.amount) >= 0) continue;
+          const source = matchSource(t);
+          if (source) {
+            incomeItems.push({ txn: t, source, amount: Math.abs(Number(t.amount)) });
+          }
+        }
+
+        const incomeTransactions = incomeItems.map(i => i.txn);
+        const receivedIncome = incomeItems.reduce((sum, i) => sum + i.amount, 0);
 
         const entityIds = [ENTITY_IDS.personal, ENTITY_IDS.vd, ENTITY_IDS.vcg];
         const incomeByEntity = entityIds.map(eid => {
           const entitySources = sources.filter((s: any) => s.entity_id === eid);
           const expected = entitySources.reduce((sum: number, s: any) => sum + Number(s.estimated_monthly || 0), 0);
-          const received = incomeTransactions
-            .filter((t: any) => t.entity_id === eid)
-            .reduce((sum: number, t: any) => sum + Math.abs(Number(t.amount)), 0);
+          const received = incomeItems
+            .filter(i => i.txn.entity_id === eid)
+            .reduce((sum, i) => sum + i.amount, 0);
           return { entity: ENTITY_LABELS[eid] || eid, expected, received };
         }).filter(e => e.expected > 0 || e.received > 0);
 
-        const titheByEntity = entityIds.map(eid => {
-          const entityIncome = incomeTransactions
-            .filter((t: any) => t.entity_id === eid)
-            .reduce((sum: number, t: any) => sum + Math.abs(Number(t.amount)), 0);
-          const entityTithePaid = transactions
+        // Build per-paycheck tithing items
+        const tithingItems = incomeItems.map(i => {
+          const titheOwed = i.amount * 0.1;
+          return {
+            sourceName: i.source.name,
+            sourceType: i.source.type,
+            entity: ENTITY_LABELS[i.txn.entity_id] || i.txn.entity_id,
+            entityId: i.txn.entity_id,
+            date: i.txn.date,
+            income: i.amount,
+            titheOwed,
+          };
+        });
+
+        // Get total tithe paid by entity
+        const tithePaidByEntity: Record<string, number> = {};
+        for (const eid of entityIds) {
+          tithePaidByEntity[eid] = transactions
             .filter((t: any) => t.entity_id === eid && Number(t.amount) > 0 && isTithingTransaction(t.merchant_name))
             .reduce((sum: number, t: any) => sum + Number(t.amount), 0);
-          const gap = (entityIncome * 0.1) - entityTithePaid;
-          return { entity: ENTITY_LABELS[eid] || eid, incomeReceived: entityIncome, tithePaid: entityTithePaid, gap: Math.max(0, gap) };
+        }
+
+        const totalTitheOwed = tithingItems.reduce((sum, i) => sum + i.titheOwed, 0);
+        const totalTithePaid = Object.values(tithePaidByEntity).reduce((sum, v) => sum + v, 0);
+
+        // Keep titheByEntity for backward compat
+        const titheByEntity = entityIds.map(eid => {
+          const entityIncome = incomeItems
+            .filter(i => i.txn.entity_id === eid)
+            .reduce((sum, i) => sum + i.amount, 0);
+          const tithePaid = tithePaidByEntity[eid] || 0;
+          const gap = (entityIncome * 0.1) - tithePaid;
+          return { entity: ENTITY_LABELS[eid] || eid, incomeReceived: entityIncome, tithePaid, gap: Math.max(0, gap) };
         }).filter(e => e.incomeReceived > 0 || e.tithePaid > 0);
 
-        const totalTitheOwed = titheByEntity.reduce((sum, e) => sum + (e.incomeReceived * 0.1), 0);
-        const totalTithePaid = titheByEntity.reduce((sum, e) => sum + e.tithePaid, 0);
-
-        const income1099 = incomeTransactions
-          .filter((t: any) => t.entity_id === ENTITY_IDS.vd)
-          .reduce((sum: number, t: any) => sum + Math.abs(Number(t.amount)), 0);
+        const income1099 = incomeItems
+          .filter(i => i.source.type === '1099')
+          .reduce((sum, i) => sum + i.amount, 0);
         const totalTaxReserveNeeded = income1099 * 0.38;
 
         const creditCardAccounts = allAccounts.filter((a: any) => a.type === 'credit' || a.subtype === 'credit card');
@@ -195,6 +229,7 @@ export default function DailyBriefing() {
         setData({
           expectedIncome, receivedIncome, incomeByEntity,
           totalTitheOwed, totalTithePaid, titheByEntity,
+          tithingItems: tithingItems.map(i => ({ ...i, paid: false })),
           totalTaxReserveNeeded, creditCards, actions,
           periodStart: period.start, periodEnd: period.end,
         });
@@ -264,26 +299,33 @@ export default function DailyBriefing() {
           <div>
             <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Tithing — 10%</h3>
             <div className="space-y-1.5">
-              {data.titheByEntity.map((e, i) => {
-                const owed = e.incomeReceived * 0.1;
+              {data.tithingItems.length > 0 ? data.tithingItems.map((item, i) => {
+                const dateStr = new Date(item.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
                 return (
                   <div key={i} className="flex items-start text-sm">
-                    {e.gap <= 0 ? <CheckIcon /> : e.gap >= 200 ? <AlertIcon /> : <WarnIcon />}
+                    {item.paid ? <CheckIcon /> : <AlertIcon />}
                     <span>
-                      <span className="font-medium">{e.entity}:</span>{' '}
-                      {e.gap <= 0 ? (
-                        <span className="text-emerald-400">Current — {fmt(e.tithePaid)} paid</span>
+                      {item.paid ? (
+                        <span className="text-emerald-400">Tithed {fmt(item.titheOwed)} for {item.sourceName} on {dateStr}</span>
                       ) : (
-                        <span className="text-red-400">{fmt(e.gap)} gap — {fmt(e.tithePaid)} of {fmt(owed)} paid</span>
+                        <span className="text-red-400">Tithe {fmt(item.titheOwed)} for {item.sourceName} payment on {dateStr}</span>
                       )}
+                      <span className="text-zinc-500 ml-1">({fmt(item.income)} gross)</span>
                     </span>
                   </div>
                 );
-              })}
-              {data.titheByEntity.length === 0 && (
+              }) : (
                 <div className="flex items-start text-sm">
                   <StatusDot status="info" />
                   <span className="text-zinc-400">No income received this period yet</span>
+                </div>
+              )}
+              {data.totalTithePaid > 0 && (
+                <div className="flex items-start text-sm mt-2 pt-2 border-t border-zinc-700">
+                  <StatusDot status={data.totalTitheOwed - data.totalTithePaid <= 0 ? 'good' : 'warn'} />
+                  <span className="text-zinc-400">
+                    Total paid: {fmt(data.totalTithePaid)} of {fmt(data.totalTitheOwed)} owed
+                  </span>
                 </div>
               )}
             </div>

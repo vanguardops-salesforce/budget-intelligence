@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import Link from 'next/link';
+import DailyBriefing from "@/components/daily-briefing";
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { PlaidLink } from '@/components/plaid-link';
 import { NetWorthChart } from '@/components/net-worth-chart';
@@ -394,6 +395,8 @@ export default async function DashboardPage() {
           </div>
         )}
       </div>
+
+      <DailyBriefing />
 
       {/* Urgent Credit Card Alerts */}
       {ccAlerts.length > 0 && (

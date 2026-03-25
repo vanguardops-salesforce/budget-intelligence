@@ -120,7 +120,18 @@ export default function DailyBriefing() {
         const allAccounts = accounts || [];
 
         const expectedIncome = sources.reduce((sum: number, s: any) => sum + Number(s.estimated_monthly || 0), 0);
-        const incomeTransactions = transactions.filter((t: any) => Number(t.amount) < 0);
+
+        // Build list of known income source names to match against
+        const sourceNames = sources.map((s: any) => (s.name || '').toLowerCase());
+
+        // Only count deposits that match a known income source name
+        const isIncomeTransaction = (t: any) => {
+          if (Number(t.amount) >= 0) return false;
+          const merchant = (t.merchant_name || t.name || '').toLowerCase();
+          return sourceNames.some((sn: string) => merchant.includes(sn.toLowerCase()) || sn.toLowerCase().includes(merchant));
+        };
+
+        const incomeTransactions = transactions.filter(isIncomeTransaction);
         const receivedIncome = incomeTransactions.reduce((sum: number, t: any) => sum + Math.abs(Number(t.amount)), 0);
 
         const entityIds = [ENTITY_IDS.personal, ENTITY_IDS.vd, ENTITY_IDS.vcg];

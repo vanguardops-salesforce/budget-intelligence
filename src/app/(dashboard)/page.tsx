@@ -313,11 +313,13 @@ export default async function DashboardPage() {
   // Match deposits against merchant_patterns from income_sources
   const matchIncomeSource = (merchantName: string) => {
     const merchant = (merchantName || '').toLowerCase();
+    if (!merchant) return null;
     for (const s of incomeSources) {
-      const raw = (s as any).merchant_patterns || s.name || '';
+      const raw = (s as any).merchant_patterns;
+      if (!raw) continue; // skip sources without explicit merchant patterns
       const patterns = (typeof raw === 'string' ? raw : String(raw))
         .split(',').map((p: string) => p.trim().toLowerCase()).filter(Boolean);
-      if (patterns.some((p: string) => merchant.includes(p))) return s;
+      if (patterns.length > 0 && patterns.some((p: string) => merchant.includes(p))) return s;
     }
     return null;
   };

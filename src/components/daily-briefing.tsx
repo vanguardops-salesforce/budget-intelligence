@@ -125,9 +125,13 @@ export default function DailyBriefing() {
         // Match deposits against merchant_patterns from income_sources
         const matchSource = (t: any) => {
           const merchant = (t.merchant_name || t.name || '').toLowerCase();
+          if (!merchant) return null;
           for (const s of sources) {
-            const patterns = (s.merchant_patterns || s.name || '').split(',').map((p: string) => p.trim().toLowerCase()).filter(Boolean);
-            if (patterns.some((p: string) => merchant.includes(p))) {
+            const raw = s.merchant_patterns;
+            if (!raw) continue; // skip sources without explicit merchant patterns
+            const patterns = (typeof raw === 'string' ? raw : String(raw))
+              .split(',').map((p: string) => p.trim().toLowerCase()).filter(Boolean);
+            if (patterns.length > 0 && patterns.some((p: string) => merchant.includes(p))) {
               return s;
             }
           }

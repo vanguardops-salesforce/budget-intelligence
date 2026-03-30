@@ -299,7 +299,7 @@ export default async function DashboardPage() {
     .filter(t => taxPaymentCategoryIds.includes(t.user_category_id ?? '') && Number(t.amount) > 0)
     .reduce((sum, t) => sum + Number(t.amount), 0);
 
-  // Tithing tracker
+  // Tithing tracker — running ledger approach
   const tithingRate = 0.10;
   const tithingTransactions = allMtdTransactions.filter(t => {
     const name = (t.merchant_name || '').toLowerCase();
@@ -308,34 +308,54 @@ export default async function DashboardPage() {
   const actualTithing = tithingTransactions
     .filter(t => Number(t.amount) > 0)
     .reduce((sum, t) => sum + Number(t.amount), 0);
-  
-  // Calculate expected tithe based on actual income received this period
-  const totalIncomeReceived = allMtdTransactions
-    .filter(t => Number(t.amount) < 0)
-    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
-  const expectedTithe = totalIncomeReceived * tithingRate;
-  const tithingGap = expectedTithe - actualTithing;
-  
-  // By entity
-  const personalTithing = tithingTransactions
-    .filter(t => t.entity_id === personalEntityId && Number(t.amount) > 0)
-    .reduce((sum, t) => sum + Number(t.amount), 0);
-  const vdTithing = tithingTransactions
-    .filter(t => t.entity_id === '22222222-2222-2222-2222-222222222222' && Number(t.amount) > 0)
-    .reduce((sum, t) => sum + Number(t.amount), 0);
-  const vcgTithing = tithingTransactions
-    .filter(t => t.entity_id === '33333333-3333-3333-3333-333333333333' && Number(t.amount) > 0)
-    .reduce((sum, t) => sum + Number(t.amount), 0);
 
-  const personalIncome = allMtdTransactions
-    .filter(t => t.entity_id === personalEntityId && Number(t.amount) < 0)
-    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
-  const vdIncome = allMtdTransactions
-    .filter(t => t.entity_id === '22222222-2222-2222-2222-222222222222' && Number(t.amount) < 0)
-    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
-  const vcgIncome = allMtdTransactions
-    .filter(t => t.entity_id === '33333333-3333-3333-3333-333333333333' && Number(t.amount) < 0)
-    .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+  // Income deposits sorted chronologically
+  const incomeDeposits = allMtdTransactions
+    .filter(t => Number(t.amount) < 0)
+    .map(t => ({
+      amount: Math.abs(Number(t.amount)),
+      titheOwed: Math.abs(Number(t.amount)) * tithingRate,
+      date: t.date as string,
+      source: (t.merchant_name || 'Deposit') as string,
+      entityId: t.entity_id as string,
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const totalIncomeReceived = incomeDeposits.reduce((sum, d) => sum + d.amount, 0);
+  const expectedTithe = totalIncomeReceived * tithingRate;
+  const tithingGap = Math.max(0, expectedTithe - actualTithing);
+  const tithingIsCurrent = actualTithing >= expectedTithe;
+
+  // Running ledger: apply tithe payments against deposits in chronological order
+  // Only deposits whose 10% isn't covered show up as warnings
+  let runningCredit = actualTithing;
+  const uncoveredDeposits: typeof incomeDeposits = [];
+  for (const deposit of incomeDeposits) {
+    if (runningCredit >= deposit.titheOwed) {
+      runningCredit -= deposit.titheOwed;
+    } else {
+      const uncoveredAmount = deposit.titheOwed - runningCredit;
+      uncoveredDeposits.push({ ...deposit, titheOwed: uncoveredAmount });
+      runningCredit = 0;
+    }
+  }
+
+  // Entity-level: aggregate income and tithe payments per entity
+  const entityIds = [
+    { id: personalEntityId, name: 'Personal' },
+    { id: vdEntityId, name: 'Veteran Digital' },
+    { id: vcgEntityId, name: 'Veteran Capital Group' },
+  ];
+  const entityTithingData = entityIds.map(({ id, name }) => {
+    const income = allMtdTransactions
+      .filter(t => t.entity_id === id && Number(t.amount) < 0)
+      .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+    const paid = tithingTransactions
+      .filter(t => t.entity_id === id && Number(t.amount) > 0)
+      .reduce((sum, t) => sum + Number(t.amount), 0);
+    const owed = income * tithingRate;
+    return { id, name, income, paid, owed, gap: Math.max(0, owed - paid), isCurrent: paid >= owed };
+  }).filter(e => e.income > 0 || e.paid > 0);
 
   // Credit card payment alerts
   const ccAlerts = creditCards
@@ -589,7 +609,7 @@ export default async function DashboardPage() {
           <CardHeader>
             <CardTitle>Tithing — 10% Commitment</CardTitle>
             <CardDescription>
-              {tithingGap <= 0
+              {tithingIsCurrent
                 ? 'You are current on your tithe this period.'
                 : `You owe ${formatCurrency(tithingGap)} more to reach 10% of income received.`}
             </CardDescription>
@@ -599,22 +619,41 @@ export default async function DashboardPage() {
               {/* Overall progress */}
               <div className="flex justify-between items-center">
                 <span className="text-sm font-medium">Period Progress</span>
-                <span className="text-sm tabular-nums">
-                  {formatCurrency(actualTithing)} of {formatCurrency(expectedTithe)} ({expectedTithe > 0 ? Math.round((actualTithing / expectedTithe) * 100) : 0}%)
+                <span className={`text-sm tabular-nums font-medium ${tithingIsCurrent ? 'text-green-700' : 'text-yellow-700'}`}>
+                  Total paid: {formatCurrency(actualTithing)} of {formatCurrency(expectedTithe)} owed
                 </span>
               </div>
               <div className="h-3 rounded-full bg-gray-100 overflow-hidden">
                 <div
-                  className={`h-full rounded-full ${tithingGap <= 0 ? 'bg-green-500' : actualTithing / expectedTithe > 0.5 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                  className={`h-full rounded-full ${tithingIsCurrent ? 'bg-green-500' : actualTithing / expectedTithe > 0.5 ? 'bg-yellow-500' : 'bg-red-500'}`}
                   style={{ width: `${Math.min(100, expectedTithe > 0 ? (actualTithing / expectedTithe) * 100 : 0)}%` }}
                 />
               </div>
 
-              {tithingGap > 0 && (
-                <div className="rounded-lg border border-yellow-300 bg-white p-3">
-                  <p className="text-sm text-gray-900">
-                    <strong className="text-yellow-600">Gap: {formatCurrency(tithingGap)}</strong> — tithe this before your next deposit hits.
-                  </p>
+              {tithingIsCurrent ? (
+                <div className="flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 p-3 text-green-800">
+                  <span className="text-lg">&#10003;</span>
+                  <span className="text-sm font-medium">You&apos;re current on tithing this period</span>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {uncoveredDeposits.map((deposit, i) => (
+                    <div key={i} className="flex items-start gap-2 rounded-lg border border-yellow-200 bg-yellow-50 p-3">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-yellow-600" />
+                      <p className="text-sm">
+                        <strong className="text-yellow-800">Tithe {formatCurrency(deposit.titheOwed)}</strong>
+                        <span className="text-yellow-700">
+                          {' '}for {deposit.source} payment on{' '}
+                          {new Date(deposit.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        </span>
+                      </p>
+                    </div>
+                  ))}
+                  <div className="rounded-lg border border-yellow-300 bg-white p-3">
+                    <p className="text-sm text-gray-900">
+                      <strong className="text-yellow-600">Remaining gap: {formatCurrency(tithingGap)}</strong> — tithe this before your next deposit hits.
+                    </p>
+                  </div>
                 </div>
               )}
 
@@ -622,54 +661,23 @@ export default async function DashboardPage() {
               <Separator />
               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">By Entity</p>
               <div className="space-y-2">
-                <div className="flex justify-between items-center text-sm rounded-lg border p-3">
-                  <div>
-                    <span className="font-medium">Personal</span>
-                    <span className="ml-2 text-xs text-muted-foreground">Income: {formatCurrency(personalIncome)}</span>
+                {entityTithingData.map(entity => (
+                  <div key={entity.id} className="flex justify-between items-center text-sm rounded-lg border p-3">
+                    <div>
+                      <span className="font-medium">{entity.name}</span>
+                      <span className="ml-2 text-xs text-muted-foreground">Income: {formatCurrency(entity.income)}</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="font-bold tabular-nums">{formatCurrency(entity.paid)}</span>
+                      <span className="text-xs text-muted-foreground ml-1">/ {formatCurrency(entity.owed)}</span>
+                      {entity.isCurrent ? (
+                        <p className="text-xs text-green-600">Current</p>
+                      ) : (
+                        <p className="text-xs text-yellow-600">Gap: {formatCurrency(entity.gap)}</p>
+                      )}
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <span className="font-bold tabular-nums">{formatCurrency(personalTithing)}</span>
-                    <span className="text-xs text-muted-foreground ml-1">/ {formatCurrency(personalIncome * tithingRate)}</span>
-                    {personalTithing < personalIncome * tithingRate && personalIncome > 0 && (
-                      <p className="text-xs text-yellow-600">Gap: {formatCurrency(personalIncome * tithingRate - personalTithing)}</p>
-                    )}
-                    {personalTithing >= personalIncome * tithingRate && personalIncome > 0 && (
-                      <p className="text-xs text-green-600">Current</p>
-                    )}
-                  </div>
-                </div>
-                <div className="flex justify-between items-center text-sm rounded-lg border p-3">
-                  <div>
-                    <span className="font-medium">Veteran Digital</span>
-                    <span className="ml-2 text-xs text-muted-foreground">Income: {formatCurrency(vdIncome)}</span>
-                  </div>
-                  <div className="text-right">
-                    <span className="font-bold tabular-nums">{formatCurrency(vdTithing)}</span>
-                    <span className="text-xs text-muted-foreground ml-1">/ {formatCurrency(vdIncome * tithingRate)}</span>
-                    {vdTithing < vdIncome * tithingRate && vdIncome > 0 && (
-                      <p className="text-xs text-yellow-600">Gap: {formatCurrency(vdIncome * tithingRate - vdTithing)}</p>
-                    )}
-                    {vdTithing >= vdIncome * tithingRate && vdIncome > 0 && (
-                      <p className="text-xs text-green-600">Current</p>
-                    )}
-                  </div>
-                </div>
-                <div className="flex justify-between items-center text-sm rounded-lg border p-3">
-                  <div>
-                    <span className="font-medium">Veteran Capital Group</span>
-                    <span className="ml-2 text-xs text-muted-foreground">Income: {formatCurrency(vcgIncome)}</span>
-                  </div>
-                  <div className="text-right">
-                    <span className="font-bold tabular-nums">{formatCurrency(vcgTithing)}</span>
-                    <span className="text-xs text-muted-foreground ml-1">/ {formatCurrency(vcgIncome * tithingRate)}</span>
-                    {vcgTithing < vcgIncome * tithingRate && vcgIncome > 0 && (
-                      <p className="text-xs text-yellow-600">Gap: {formatCurrency(vcgIncome * tithingRate - vcgTithing)}</p>
-                    )}
-                    {vcgTithing >= vcgIncome * tithingRate && vcgIncome > 0 && (
-                      <p className="text-xs text-green-600">Current</p>
-                    )}
-                  </div>
-                </div>
+                ))}
               </div>
             </div>
           </CardContent>

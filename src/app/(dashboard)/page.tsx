@@ -75,7 +75,7 @@ export default async function DashboardPage() {
       .order('priority', { ascending: true }),
     supabase
       .from('income_sources')
-      .select('name, type, rate_amount, rate_type, estimated_monthly, start_date, end_date, entity_id')
+      .select('name, type, rate_amount, rate_type, estimated_monthly, start_date, end_date, entity_id, merchant_patterns')
       .eq('is_active', true)
       .order('estimated_monthly', { ascending: false }),
     supabase
@@ -310,16 +310,33 @@ export default async function DashboardPage() {
     .filter(t => Number(t.amount) > 0)
     .reduce((sum, t) => sum + Number(t.amount), 0);
 
-  // Income deposits sorted chronologically
+  // Match deposits against merchant_patterns from income_sources
+  const matchIncomeSource = (merchantName: string) => {
+    const merchant = (merchantName || '').toLowerCase();
+    for (const s of incomeSources) {
+      const raw = (s as any).merchant_patterns || s.name || '';
+      const patterns = (typeof raw === 'string' ? raw : String(raw))
+        .split(',').map((p: string) => p.trim().toLowerCase()).filter(Boolean);
+      if (patterns.some((p: string) => merchant.includes(p))) return s;
+    }
+    return null;
+  };
+
+  // Income deposits: only transactions matching an income_source merchant pattern
   const incomeDeposits = allMtdTransactions
     .filter(t => Number(t.amount) < 0)
-    .map(t => ({
-      amount: Math.abs(Number(t.amount)),
-      titheOwed: Math.abs(Number(t.amount)) * tithingRate,
-      date: t.date as string,
-      source: (t.merchant_name || 'Deposit') as string,
-      entityId: t.entity_id as string,
-    }))
+    .map(t => {
+      const source = matchIncomeSource(t.merchant_name || '');
+      if (!source) return null;
+      return {
+        amount: Math.abs(Number(t.amount)),
+        titheOwed: Math.abs(Number(t.amount)) * tithingRate,
+        date: t.date as string,
+        source: source.name as string,
+        entityId: t.entity_id as string,
+      };
+    })
+    .filter((d): d is NonNullable<typeof d> => d !== null)
     .sort((a, b) => a.date.localeCompare(b.date));
 
   const totalIncomeReceived = incomeDeposits.reduce((sum, d) => sum + d.amount, 0);
@@ -348,9 +365,9 @@ export default async function DashboardPage() {
     { id: vcgEntityId, name: 'Veteran Capital Group' },
   ];
   const entityTithingData = entityIds.map(({ id, name }) => {
-    const income = allMtdTransactions
-      .filter(t => t.entity_id === id && Number(t.amount) < 0)
-      .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+    const income = incomeDeposits
+      .filter(d => d.entityId === id)
+      .reduce((sum, d) => sum + d.amount, 0);
     const paid = tithingTransactions
       .filter(t => t.entity_id === id && Number(t.amount) > 0)
       .reduce((sum, t) => sum + Number(t.amount), 0);

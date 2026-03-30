@@ -226,10 +226,26 @@ export default function DailyBriefing() {
         actions.push({ label: 'CPA — not yet engaged', status: 'overdue', detail: 'Required for S-Corp, quarterly estimates, REP status' });
         actions.push({ label: 'Emergency fund: ~$20K of $60K target', status: 'upcoming', detail: 'Transfer $5,000/mo to Citi Accelerate' });
 
+        // Running ledger: apply tithe payments against income deposits chronologically
+        // Sort by date ascending so earliest paychecks get covered first
+        const sortedTithingItems = [...tithingItems].sort((a, b) => a.date.localeCompare(b.date));
+        let remainingCredit = totalTithePaid;
+        const ledgerItems = sortedTithingItems.map(item => {
+          if (remainingCredit >= item.titheOwed) {
+            remainingCredit -= item.titheOwed;
+            return { ...item, paid: true };
+          } else if (remainingCredit > 0) {
+            const uncovered = item.titheOwed - remainingCredit;
+            remainingCredit = 0;
+            return { ...item, paid: false, titheOwed: uncovered };
+          }
+          return { ...item, paid: false };
+        });
+
         setData({
           expectedIncome, receivedIncome, incomeByEntity,
           totalTitheOwed, totalTithePaid, titheByEntity,
-          tithingItems: tithingItems.map(i => ({ ...i, paid: false })),
+          tithingItems: ledgerItems,
           totalTaxReserveNeeded, creditCards, actions,
           periodStart: period.start, periodEnd: period.end,
         });
@@ -299,35 +315,44 @@ export default function DailyBriefing() {
           <div>
             <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Tithing — 10%</h3>
             <div className="space-y-1.5">
-              {data.tithingItems.length > 0 ? data.tithingItems.map((item, i) => {
-                const dateStr = new Date(item.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
-                return (
-                  <div key={i} className="flex items-start text-sm">
-                    {item.paid ? <CheckIcon /> : <AlertIcon />}
-                    <span>
-                      {item.paid ? (
-                        <span className="text-emerald-400">Tithed {fmt(item.titheOwed)} for {item.sourceName} on {dateStr}</span>
-                      ) : (
-                        <span className="text-red-400">Tithe {fmt(item.titheOwed)} for {item.sourceName} payment on {dateStr}</span>
-                      )}
-                      <span className="text-zinc-500 ml-1">({fmt(item.income)} gross)</span>
-                    </span>
-                  </div>
-                );
-              }) : (
+              {data.tithingItems.length === 0 ? (
                 <div className="flex items-start text-sm">
                   <StatusDot status="info" />
                   <span className="text-zinc-400">No income received this period yet</span>
                 </div>
-              )}
-              {data.totalTithePaid > 0 && (
-                <div className="flex items-start text-sm mt-2 pt-2 border-t border-zinc-700">
-                  <StatusDot status={data.totalTitheOwed - data.totalTithePaid <= 0 ? 'good' : 'warn'} />
-                  <span className="text-zinc-400">
-                    Total paid: {fmt(data.totalTithePaid)} of {fmt(data.totalTitheOwed)} owed
-                  </span>
+              ) : data.totalTithePaid >= data.totalTitheOwed ? (
+                <div className="flex items-start text-sm">
+                  <CheckIcon />
+                  <span className="text-emerald-400">Current on tithing this period</span>
                 </div>
+              ) : (
+                <>
+                  {data.tithingItems.filter(item => !item.paid).map((item, i) => {
+                    const dateStr = new Date(item.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+                    return (
+                      <div key={i} className="flex items-start text-sm">
+                        <AlertIcon />
+                        <span>
+                          <span className="text-red-400">Tithe {fmt(item.titheOwed)} for {item.sourceName} payment on {dateStr}</span>
+                          <span className="text-zinc-500 ml-1">({fmt(item.income)} gross)</span>
+                        </span>
+                      </div>
+                    );
+                  })}
+                  <div className="flex items-start text-sm mt-1">
+                    <StatusDot status="warn" />
+                    <span className="text-amber-400">
+                      Remaining gap: {fmt(data.totalTitheOwed - data.totalTithePaid)}
+                    </span>
+                  </div>
+                </>
               )}
+              <div className="flex items-start text-sm mt-2 pt-2 border-t border-zinc-700">
+                <StatusDot status={data.totalTithePaid >= data.totalTitheOwed ? 'good' : 'warn'} />
+                <span className={data.totalTithePaid >= data.totalTitheOwed ? 'text-emerald-400' : 'text-zinc-400'}>
+                  Total paid: {fmt(data.totalTithePaid)} of {fmt(data.totalTitheOwed)} owed
+                </span>
+              </div>
             </div>
           </div>
 

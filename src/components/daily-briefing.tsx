@@ -127,13 +127,18 @@ export default function DailyBriefing() {
           const merchant = (t.merchant_name || t.name || '').toLowerCase();
           if (!merchant) return null;
           for (const s of sources) {
-            const raw = s.merchant_patterns;
-            if (!raw) continue; // skip sources without explicit merchant patterns
-            const patterns = (typeof raw === 'string' ? raw : String(raw))
-              .split(',').map((p: string) => p.trim().toLowerCase()).filter(Boolean);
-            if (patterns.length > 0 && patterns.some((p: string) => merchant.includes(p))) {
-              return s;
-            }
+           const raw = s.merchant_patterns;
+          if (!raw) continue;
+          // Supabase returns TEXT[] as a JS array; handle string fallback just in case
+          const rawArray = Array.isArray(raw)
+            ? raw
+            : String(raw).replace(/^\{|\}$/g, '').split(',');
+          const patterns = rawArray
+            .map((p: string) => p.trim().replace(/^["']|["']$/g, '').replace(/%/g, '').toLowerCase())
+            .filter(Boolean);
+          if (patterns.length > 0 && patterns.some((p: string) => merchant.includes(p))) {
+            return s;
+          }
           }
           return null;
         };

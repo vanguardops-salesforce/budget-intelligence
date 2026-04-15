@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
+type ActionStatus = 'overdue' | 'due' | 'upcoming' | 'done' | 'in_progress' | 'on_track' | 'snoozed';
+
 interface BriefingData {
   expectedIncome: number;
   receivedIncome: number;
@@ -13,7 +15,7 @@ interface BriefingData {
   tithingItems: { sourceName: string; sourceType: string; entity: string; entityId: string; date: string; income: number; titheOwed: number; paid: boolean }[];
   totalTaxReserveNeeded: number;
   creditCards: { name: string; balance: number }[];
-  actions: { label: string; status: 'overdue' | 'due' | 'upcoming' | 'done'; detail: string }[];
+  actions: { label: string; status: ActionStatus; detail: string }[];
   periodStart: string;
   periodEnd: string;
 }
@@ -42,9 +44,39 @@ function WarnIcon() {
   );
 }
 
+function ProgressIcon() {
+  return (
+    <svg className="w-4 h-4 text-blue-400 mr-2 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 12a8 8 0 0116 0M20 12a8 8 0 01-8 8" />
+    </svg>
+  );
+}
+
 function StatusDot({ status }: { status: 'good' | 'warn' | 'alert' | 'info' }) {
   const colors = { good: 'bg-emerald-500', warn: 'bg-amber-500', alert: 'bg-red-500', info: 'bg-blue-400' };
   return <span className={`inline-block w-2 h-2 rounded-full ${colors[status]} mr-2 flex-shrink-0 mt-1.5`} />;
+}
+
+function actionIcon(status: ActionStatus) {
+  switch (status) {
+    case 'done': return <CheckIcon />;
+    case 'overdue': return <AlertIcon />;
+    case 'due': return <WarnIcon />;
+    case 'in_progress': return <ProgressIcon />;
+    case 'on_track': return <StatusDot status="good" />;
+    default: return <StatusDot status="info" />;
+  }
+}
+
+function actionLabelClass(status: ActionStatus) {
+  switch (status) {
+    case 'overdue': return 'text-red-400';
+    case 'due': return 'text-amber-400';
+    case 'in_progress': return 'text-blue-400';
+    case 'on_track': return 'text-emerald-400';
+    case 'done': return 'text-zinc-500 line-through';
+    default: return '';
+  }
 }
 
 const fmt = (n: number) =>
@@ -116,20 +148,26 @@ export default function DailyBriefing() {
           .eq('user_id', user.id)
           .is('deleted_at', null);
 
+        const { data: persistentActions } = await supabase
+          .from('action_items')
+          .select('label, detail, status, sort_order, due_date')
+          .eq('user_id', user.id)
+          .eq('is_active', true)
+          .neq('status', 'snoozed')
+          .order('sort_order', { ascending: true });
+
         const transactions = txns || [];
         const sources = incomeSources || [];
         const allAccounts = accounts || [];
 
         const expectedIncome = sources.reduce((sum: number, s: any) => sum + Number(s.estimated_monthly || 0), 0);
 
-        // Match deposits against merchant_patterns from income_sources
         const matchSource = (t: any) => {
           const merchant = (t.merchant_name || t.name || '').toLowerCase();
           if (!merchant) return null;
           for (const s of sources) {
            const raw = s.merchant_patterns;
           if (!raw) continue;
-          // Supabase returns TEXT[] as a JS array; handle string fallback just in case
           const rawArray = Array.isArray(raw)
             ? raw
             : String(raw).replace(/^\{|\}$/g, '').split(',');
@@ -143,7 +181,6 @@ export default function DailyBriefing() {
           return null;
         };
 
-        // Build individual income items with source info
         const incomeItems: { txn: any; source: any; amount: number }[] = [];
         for (const t of transactions) {
           if (Number(t.amount) >= 0) continue;
@@ -153,7 +190,6 @@ export default function DailyBriefing() {
           }
         }
 
-        const incomeTransactions = incomeItems.map(i => i.txn);
         const receivedIncome = incomeItems.reduce((sum, i) => sum + i.amount, 0);
 
         const entityIds = [ENTITY_IDS.personal, ENTITY_IDS.vd, ENTITY_IDS.vcg];
@@ -166,7 +202,6 @@ export default function DailyBriefing() {
           return { entity: ENTITY_LABELS[eid] || eid, expected, received };
         }).filter(e => e.expected > 0 || e.received > 0);
 
-        // Build per-paycheck tithing items
         const tithingItems = incomeItems.map(i => {
           const titheOwed = i.amount * 0.1;
           return {
@@ -180,7 +215,6 @@ export default function DailyBriefing() {
           };
         });
 
-        // Get total tithe paid by entity
         const tithePaidByEntity: Record<string, number> = {};
         for (const eid of entityIds) {
           tithePaidByEntity[eid] = transactions
@@ -191,7 +225,6 @@ export default function DailyBriefing() {
         const totalTitheOwed = tithingItems.reduce((sum, i) => sum + i.titheOwed, 0);
         const totalTithePaid = Object.values(tithePaidByEntity).reduce((sum, v) => sum + v, 0);
 
-        // Keep titheByEntity for backward compat
         const titheByEntity = entityIds.map(eid => {
           const entityIncome = incomeItems
             .filter(i => i.txn.entity_id === eid)
@@ -212,9 +245,9 @@ export default function DailyBriefing() {
           balance: Math.abs(Number(a.balance_current || 0)),
         }));
 
-        const today = new Date();
         const actions: BriefingData['actions'] = [];
 
+        // === DYNAMIC actions (computed from this period's data) ===
         const totalTitheGap = totalTitheOwed - totalTithePaid;
         if (totalTitheGap > 50) {
           actions.push({ label: `Tithe gap: ${fmt(totalTitheGap)} owed`, status: 'due', detail: 'Pay before next deposit lands' });
@@ -224,19 +257,15 @@ export default function DailyBriefing() {
           actions.push({ label: `Move ${fmt(totalTaxReserveNeeded)} to tax reserve HYSA`, status: income1099 > 0 ? 'due' : 'upcoming', detail: '38% of 1099 income this period' });
         }
 
-        const apr15 = new Date(2026, 3, 15);
-        const daysToApr15 = Math.ceil((apr15.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-        if (daysToApr15 > 0 && daysToApr15 <= 60) {
-          actions.push({ label: `Q1 estimated tax due in ${daysToApr15} days`, status: daysToApr15 <= 14 ? 'overdue' : 'upcoming', detail: 'April 15 — file via IRS Direct Pay' });
+        // === PERSISTENT actions (from action_items table) ===
+        for (const a of persistentActions || []) {
+          actions.push({
+            label: a.label,
+            detail: a.detail || '',
+            status: a.status as ActionStatus,
+          });
         }
 
-        actions.push({ label: 'S-Corp election — not filed', status: 'overdue', detail: 'Costing ~$3,000/mo in unnecessary SE tax' });
-        actions.push({ label: 'IUL — still paying $2,760/mo', status: 'overdue', detail: 'Reduce to minimum premium or surrender' });
-        actions.push({ label: 'CPA — not yet engaged', status: 'overdue', detail: 'Required for S-Corp, quarterly estimates, REP status' });
-        actions.push({ label: 'Emergency fund: ~$20K of $60K target', status: 'upcoming', detail: 'Transfer $5,000/mo to Citi Accelerate' });
-
-        // Running ledger: apply tithe payments against income deposits chronologically
-        // Sort by date ascending so earliest paychecks get covered first
         const sortedTithingItems = [...tithingItems].sort((a, b) => a.date.localeCompare(b.date));
         let remainingCredit = totalTithePaid;
         const ledgerItems = sortedTithingItems.map(item => {
@@ -282,10 +311,10 @@ export default function DailyBriefing() {
   if (!data) return null;
 
   const period = getCurrentPeriod();
-  const titheGap = Math.max(0, data.totalTitheOwed - data.totalTithePaid);
   const incomePercent = data.expectedIncome > 0 ? Math.round((data.receivedIncome / data.expectedIncome) * 100) : 0;
   const overdueCount = data.actions.filter(a => a.status === 'overdue').length;
   const dueCount = data.actions.filter(a => a.status === 'due').length;
+  const inProgressCount = data.actions.filter(a => a.status === 'in_progress').length;
 
   return (
     <div className="rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 mb-6 overflow-hidden">
@@ -306,7 +335,12 @@ export default function DailyBriefing() {
               {dueCount} due now
             </span>
           )}
-          {overdueCount === 0 && dueCount === 0 && (
+          {inProgressCount > 0 && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-900/40 text-blue-400">
+              {inProgressCount} in progress
+            </span>
+          )}
+          {overdueCount === 0 && dueCount === 0 && inProgressCount === 0 && (
             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-900/40 text-emerald-400">
               All clear
             </span>
@@ -419,11 +453,11 @@ export default function DailyBriefing() {
           )}
 
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Retirement — $5M Target</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Retirement — $3M Target (Work-Optional)</h3>
             <div className="space-y-1.5">
               <div className="flex items-start text-sm">
                 <StatusDot status="info" />
-                <span className="text-zinc-400">~$150K estimated · No accounts linked yet · Target: age 50–55</span>
+                <span className="text-zinc-400">~$317K invested · ~$58K/yr rental NOI · Target: age 46–48</span>
               </div>
               <div className="flex items-start text-sm pl-4">
                 <span className="text-zinc-400 mr-1">•</span>
@@ -437,15 +471,15 @@ export default function DailyBriefing() {
             <div className="space-y-1.5">
               {data.actions
                 .sort((a, b) => {
-                  const order = { overdue: 0, due: 1, upcoming: 2, done: 3 };
+                  const order: Record<ActionStatus, number> = { overdue: 0, due: 1, in_progress: 2, on_track: 3, upcoming: 4, done: 5, snoozed: 6 };
                   return order[a.status] - order[b.status];
                 })
                 .map((action, i) => (
                   <div key={i} className="flex items-start text-sm">
-                    {action.status === 'done' ? <CheckIcon /> : action.status === 'overdue' ? <AlertIcon /> : action.status === 'due' ? <WarnIcon /> : <StatusDot status="info" />}
+                    {actionIcon(action.status)}
                     <div>
-                      <span className={`font-medium ${action.status === 'overdue' ? 'text-red-400' : ''}`}>{action.label}</span>
-                      <span className="text-zinc-400 ml-1">— {action.detail}</span>
+                      <span className={`font-medium ${actionLabelClass(action.status)}`}>{action.label}</span>
+                      {action.detail && <span className="text-zinc-400 ml-1">— {action.detail}</span>}
                     </div>
                   </div>
                 ))}

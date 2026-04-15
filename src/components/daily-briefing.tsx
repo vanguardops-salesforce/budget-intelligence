@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
 type ActionStatus = 'overdue' | 'due' | 'upcoming' | 'done' | 'in_progress' | 'on_track' | 'snoozed';
+type TitheStatus = 'owed' | 'partial' | 'paid';
 
 interface BriefingData {
   expectedIncome: number;
@@ -11,8 +12,7 @@ interface BriefingData {
   incomeByEntity: { entity: string; expected: number; received: number }[];
   totalTitheOwed: number;
   totalTithePaid: number;
-  titheByEntity: { entity: string; incomeReceived: number; tithePaid: number; gap: number }[];
-  tithingItems: { sourceName: string; sourceType: string; entity: string; entityId: string; date: string; income: number; titheOwed: number; paid: boolean }[];
+  outstandingTithes: { id: string; source: string; entity: string; entityId: string; date: string; income: number; titheOwed: number; tithePaid: number; status: TitheStatus; gap: number }[];
   totalTaxReserveNeeded: number;
   creditCards: { name: string; balance: number }[];
   actions: { label: string; status: ActionStatus; detail: string }[];
@@ -94,11 +94,6 @@ const ENTITY_LABELS: Record<string, string> = {
   '33333333-3333-3333-3333-333333333333': 'Veteran Capital Group',
 };
 
-function isTithingTransaction(merchantName: string): boolean {
-  const name = (merchantName || '').toLowerCase();
-  return name.includes('north point') || name.includes('community ch');
-}
-
 function getCurrentPeriod() {
   const today = new Date();
   const day = today.getDate();
@@ -156,6 +151,24 @@ export default function DailyBriefing() {
           .neq('status', 'snoozed')
           .order('sort_order', { ascending: true });
 
+        // Tithing now reads from the ledger, not recomputed
+        const { data: outstandingTithesRaw } = await supabase
+          .from('tithe_log')
+          .select('id, entity_id, income_date, income_source, income_amount, tithe_owed, tithe_paid, status')
+          .eq('user_id', user.id)
+          .eq('is_bonus', false)
+          .in('status', ['owed', 'partial'])
+          .order('income_date', { ascending: true });
+
+        // Period totals from ledger (paid + owed) for the "Total paid of owed" line
+        const { data: periodTithes } = await supabase
+          .from('tithe_log')
+          .select('tithe_owed, tithe_paid, status')
+          .eq('user_id', user.id)
+          .eq('is_bonus', false)
+          .gte('income_date', period.start)
+          .lte('income_date', period.end);
+
         const transactions = txns || [];
         const sources = incomeSources || [];
         const allAccounts = accounts || [];
@@ -166,17 +179,17 @@ export default function DailyBriefing() {
           const merchant = (t.merchant_name || t.name || '').toLowerCase();
           if (!merchant) return null;
           for (const s of sources) {
-           const raw = s.merchant_patterns;
-          if (!raw) continue;
-          const rawArray = Array.isArray(raw)
-            ? raw
-            : String(raw).replace(/^\{|\}$/g, '').split(',');
-          const patterns = rawArray
-            .map((p: string) => p.trim().replace(/^["']|["']$/g, '').replace(/%/g, '').toLowerCase())
-            .filter(Boolean);
-          if (patterns.length > 0 && patterns.some((p: string) => merchant.includes(p))) {
-            return s;
-          }
+            const raw = s.merchant_patterns;
+            if (!raw) continue;
+            const rawArray = Array.isArray(raw)
+              ? raw
+              : String(raw).replace(/^\{|\}$/g, '').split(',');
+            const patterns = rawArray
+              .map((p: string) => p.trim().replace(/^["']|["']$/g, '').replace(/%/g, '').toLowerCase())
+              .filter(Boolean);
+            if (patterns.length > 0 && patterns.some((p: string) => merchant.includes(p))) {
+              return s;
+            }
           }
           return null;
         };
@@ -202,37 +215,23 @@ export default function DailyBriefing() {
           return { entity: ENTITY_LABELS[eid] || eid, expected, received };
         }).filter(e => e.expected > 0 || e.received > 0);
 
-        const tithingItems = incomeItems.map(i => {
-          const titheOwed = i.amount * 0.1;
-          return {
-            sourceName: i.source.name,
-            sourceType: i.source.type,
-            entity: ENTITY_LABELS[i.txn.entity_id] || i.txn.entity_id,
-            entityId: i.txn.entity_id,
-            date: i.txn.date,
-            income: i.amount,
-            titheOwed,
-          };
-        });
+        // Build outstanding tithes from ledger
+        const outstandingTithes = (outstandingTithesRaw || []).map((row: any) => ({
+          id: row.id,
+          source: row.income_source,
+          entity: ENTITY_LABELS[row.entity_id] || row.entity_id,
+          entityId: row.entity_id,
+          date: row.income_date,
+          income: Number(row.income_amount),
+          titheOwed: Number(row.tithe_owed),
+          tithePaid: Number(row.tithe_paid),
+          status: row.status as TitheStatus,
+          gap: Number(row.tithe_owed) - Number(row.tithe_paid),
+        }));
 
-        const tithePaidByEntity: Record<string, number> = {};
-        for (const eid of entityIds) {
-          tithePaidByEntity[eid] = transactions
-            .filter((t: any) => t.entity_id === eid && Number(t.amount) > 0 && isTithingTransaction(t.merchant_name))
-            .reduce((sum: number, t: any) => sum + Number(t.amount), 0);
-        }
-
-        const totalTitheOwed = tithingItems.reduce((sum, i) => sum + i.titheOwed, 0);
-        const totalTithePaid = Object.values(tithePaidByEntity).reduce((sum, v) => sum + v, 0);
-
-        const titheByEntity = entityIds.map(eid => {
-          const entityIncome = incomeItems
-            .filter(i => i.txn.entity_id === eid)
-            .reduce((sum, i) => sum + i.amount, 0);
-          const tithePaid = tithePaidByEntity[eid] || 0;
-          const gap = (entityIncome * 0.1) - tithePaid;
-          return { entity: ENTITY_LABELS[eid] || eid, incomeReceived: entityIncome, tithePaid, gap: Math.max(0, gap) };
-        }).filter(e => e.incomeReceived > 0 || e.tithePaid > 0);
+        // Period totals (this period's obligations)
+        const totalTitheOwed = (periodTithes || []).reduce((sum: number, r: any) => sum + Number(r.tithe_owed), 0);
+        const totalTithePaid = (periodTithes || []).reduce((sum: number, r: any) => sum + Number(r.tithe_paid), 0);
 
         const income1099 = incomeItems
           .filter(i => i.source.type === '1099')
@@ -247,17 +246,16 @@ export default function DailyBriefing() {
 
         const actions: BriefingData['actions'] = [];
 
-        // === DYNAMIC actions (computed from this period's data) ===
-        const totalTitheGap = totalTitheOwed - totalTithePaid;
-        if (totalTitheGap > 50) {
-          actions.push({ label: `Tithe gap: ${fmt(totalTitheGap)} owed`, status: 'due', detail: 'Pay before next deposit lands' });
+        // Total outstanding tithe across ALL time, not just this period
+        const totalOutstanding = outstandingTithes.reduce((sum, t) => sum + t.gap, 0);
+        if (totalOutstanding > 0.5) {
+          actions.push({ label: `Tithe outstanding: ${fmt(totalOutstanding)}`, status: 'due', detail: `${outstandingTithes.length} unpaid paycheck${outstandingTithes.length === 1 ? '' : 's'}` });
         }
 
         if (totalTaxReserveNeeded > 0) {
           actions.push({ label: `Move ${fmt(totalTaxReserveNeeded)} to tax reserve HYSA`, status: income1099 > 0 ? 'due' : 'upcoming', detail: '38% of 1099 income this period' });
         }
 
-        // === PERSISTENT actions (from action_items table) ===
         for (const a of persistentActions || []) {
           actions.push({
             label: a.label,
@@ -266,24 +264,10 @@ export default function DailyBriefing() {
           });
         }
 
-        const sortedTithingItems = [...tithingItems].sort((a, b) => a.date.localeCompare(b.date));
-        let remainingCredit = totalTithePaid;
-        const ledgerItems = sortedTithingItems.map(item => {
-          if (remainingCredit >= item.titheOwed) {
-            remainingCredit -= item.titheOwed;
-            return { ...item, paid: true };
-          } else if (remainingCredit > 0) {
-            const uncovered = item.titheOwed - remainingCredit;
-            remainingCredit = 0;
-            return { ...item, paid: false, titheOwed: uncovered };
-          }
-          return { ...item, paid: false };
-        });
-
         setData({
           expectedIncome, receivedIncome, incomeByEntity,
-          totalTitheOwed, totalTithePaid, titheByEntity,
-          tithingItems: ledgerItems,
+          totalTitheOwed, totalTithePaid,
+          outstandingTithes,
           totalTaxReserveNeeded, creditCards, actions,
           periodStart: period.start, periodEnd: period.end,
         });
@@ -315,6 +299,7 @@ export default function DailyBriefing() {
   const overdueCount = data.actions.filter(a => a.status === 'overdue').length;
   const dueCount = data.actions.filter(a => a.status === 'due').length;
   const inProgressCount = data.actions.filter(a => a.status === 'in_progress').length;
+  const totalOutstanding = data.outstandingTithes.reduce((sum, t) => sum + t.gap, 0);
 
   return (
     <div className="rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 mb-6 overflow-hidden">
@@ -356,46 +341,45 @@ export default function DailyBriefing() {
           <div className="h-px bg-zinc-700 -mx-4" />
 
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Tithing — 10%</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Tithing — 10% (from ledger)</h3>
             <div className="space-y-1.5">
-              {data.tithingItems.length === 0 ? (
-                <div className="flex items-start text-sm">
-                  <StatusDot status="info" />
-                  <span className="text-zinc-400">No income received this period yet</span>
-                </div>
-              ) : data.totalTithePaid >= data.totalTitheOwed ? (
+              {data.outstandingTithes.length === 0 ? (
                 <div className="flex items-start text-sm">
                   <CheckIcon />
-                  <span className="text-emerald-400">Current on tithing this period</span>
+                  <span className="text-emerald-400">All paychecks tithed — fully reconciled</span>
                 </div>
               ) : (
                 <>
-                  {data.tithingItems.filter(item => !item.paid).map((item, i) => {
+                  {data.outstandingTithes.map((item) => {
                     const dateStr = new Date(item.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
                     return (
-                      <div key={i} className="flex items-start text-sm">
-                        <AlertIcon />
+                      <div key={item.id} className="flex items-start text-sm">
+                        {item.status === 'partial' ? <WarnIcon /> : <AlertIcon />}
                         <span>
-                          <span className="text-red-400">Tithe {fmt(item.titheOwed)} for {item.sourceName} payment on {dateStr}</span>
-                          <span className="text-zinc-500 ml-1">({fmt(item.income)} gross)</span>
+                          <span className={item.status === 'partial' ? 'text-amber-400' : 'text-red-400'}>
+                            {item.status === 'partial' ? `Partial: ${fmt(item.gap)} still owed` : `Tithe ${fmt(item.titheOwed)} owed`}
+                          </span>
+                          <span className="text-zinc-400 ml-1">— {item.entity} · {item.source} · {dateStr} ({fmt(item.income)} gross)</span>
                         </span>
                       </div>
                     );
                   })}
-                  <div className="flex items-start text-sm mt-1">
+                  <div className="flex items-start text-sm mt-1 pt-2 border-t border-zinc-700">
                     <StatusDot status="warn" />
                     <span className="text-amber-400">
-                      Remaining gap: {fmt(data.totalTitheOwed - data.totalTithePaid)}
+                      Total outstanding: {fmt(totalOutstanding)} across {data.outstandingTithes.length} paycheck{data.outstandingTithes.length === 1 ? '' : 's'}
                     </span>
                   </div>
                 </>
               )}
-              <div className="flex items-start text-sm mt-2 pt-2 border-t border-zinc-700">
-                <StatusDot status={data.totalTithePaid >= data.totalTitheOwed ? 'good' : 'warn'} />
-                <span className={data.totalTithePaid >= data.totalTitheOwed ? 'text-emerald-400' : 'text-zinc-400'}>
-                  Total paid: {fmt(data.totalTithePaid)} of {fmt(data.totalTitheOwed)} owed
-                </span>
-              </div>
+              {data.totalTitheOwed > 0 && (
+                <div className="flex items-start text-sm mt-2 pt-2 border-t border-zinc-700">
+                  <StatusDot status={data.totalTithePaid >= data.totalTitheOwed ? 'good' : 'warn'} />
+                  <span className={data.totalTithePaid >= data.totalTitheOwed ? 'text-emerald-400' : 'text-zinc-400'}>
+                    This period: {fmt(data.totalTithePaid)} of {fmt(data.totalTitheOwed)} owed
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 

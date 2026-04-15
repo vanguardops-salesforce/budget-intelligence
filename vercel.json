@@ -6,7 +6,7 @@
     },
     {
       "path": "/api/sync/heal",
-      "schedule": "0 3,15 * * *"
+      "schedule": "0 13 * * *"
     },
     {
       "path": "/api/cron/snapshots",

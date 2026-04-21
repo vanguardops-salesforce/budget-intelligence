@@ -29,8 +29,10 @@ export default async function DashboardPage() {
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
   const today = now.toISOString().split('T')[0];
 
+  const tenDaysOut = new Date(now.getTime() + 10 * 86_400_000).toISOString().split('T')[0];
+
   // Parallel data fetching
-  const [entitiesRes, accountsRes, plaidItemsRes, txRes, txDetailRes, holdingsRes, recurringRes, incomeSourcesRes] = await Promise.all([
+  const [entitiesRes, accountsRes, plaidItemsRes, txRes, txDetailRes, holdingsRes, recurringRes, incomeSourcesRes, upcomingCcRes] = await Promise.all([
     supabase.from('entities').select('id, name, type').eq('is_active', true),
     supabase
       .from('accounts')
@@ -66,6 +68,12 @@ export default async function DashboardPage() {
       .from('income_sources')
       .select('id, name, entity_id, merchant_patterns')
       .eq('is_active', true),
+    supabase
+      .from('card_statements')
+      .select('id, card_name, card_mask, last_statement_balance, next_payment_due_date, minimum_payment_amount')
+      .gte('next_payment_due_date', today)
+      .lte('next_payment_due_date', tenDaysOut)
+      .order('next_payment_due_date', { ascending: true }),
   ]);
 
   const entities = entitiesRes.data ?? [];
@@ -76,6 +84,7 @@ export default async function DashboardPage() {
   const holdings = holdingsRes.data ?? [];
   const recurringPatterns = recurringRes.data ?? [];
   const incomeSources = incomeSourcesRes.data ?? [];
+  const upcomingCc = upcomingCcRes.data ?? [];
 
   // Compute metrics
   const totalCash = accounts
@@ -450,6 +459,63 @@ export default async function DashboardPage() {
             </CardContent>
           </Card>
         </div>
+      )}
+
+      {/* Upcoming Credit Card Payments */}
+      {upcomingCc.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <CreditCard className="h-4 w-4 text-muted-foreground" />
+              Upcoming Credit Card Payments
+            </CardTitle>
+            <CardDescription>
+              Statements due within the next 10 days.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {upcomingCc.map((cc) => {
+                const due = cc.next_payment_due_date as string;
+                const dueDate = new Date(due + 'T00:00:00');
+                const daysUntil = Math.max(
+                  0,
+                  Math.round((dueDate.getTime() - new Date(today + 'T00:00:00').getTime()) / 86_400_000)
+                );
+                const urgent = daysUntil <= 3;
+                return (
+                  <div
+                    key={cc.id}
+                    className={`flex items-center justify-between rounded-lg border p-3 ${
+                      urgent ? 'border-red-200 bg-red-50' : ''
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">
+                        {cc.card_name}
+                        {cc.card_mask ? (
+                          <span className="text-muted-foreground"> {maskAccount(cc.card_mask as string, '')}</span>
+                        ) : null}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Due {dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ·{' '}
+                        {daysUntil === 0 ? 'today' : `in ${daysUntil} day${daysUntil === 1 ? '' : 's'}`}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-semibold tabular-nums">
+                        {cc.last_statement_balance != null
+                          ? formatCurrency(Number(cc.last_statement_balance))
+                          : '--'}
+                      </p>
+                      <p className="text-xs text-muted-foreground">statement balance</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Connect Bank Account */}

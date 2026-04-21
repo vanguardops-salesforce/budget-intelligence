@@ -11,6 +11,14 @@
     {
       "path": "/api/cron/snapshots",
       "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/plaid/sync-liabilities",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/generate-cc-action-items",
+      "schedule": "0 7 * * *"
     }
   ]
 }

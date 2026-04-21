@@ -265,11 +265,10 @@ async function upsertPatterns(
 
   const { count } = await supabase
     .from('recurring_patterns')
-    .update({ is_active: false })
+    .update({ is_active: false }, { count: 'exact' })
     .eq('user_id', userId)
     .eq('is_active', true)
-    .lt('last_seen_date', cutoff)
-    .select('id', { count: 'exact', head: true });
+    .lt('last_seen_date', cutoff);
 
   return { detected, updated, deactivated: count ?? 0 };
 }

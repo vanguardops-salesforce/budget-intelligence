@@ -35,6 +35,8 @@ interface Account {
 interface BudgetCategory {
   id: string;
   name: string;
+  entity_id?: string;
+  entities?: { name: string } | null;
 }
 
 interface TransactionTableProps {
@@ -43,6 +45,15 @@ interface TransactionTableProps {
   categories: BudgetCategory[];
   pageSize?: number;
   initialCategory?: string;
+}
+
+// Sort entity groups with Personal first, then alphabetical
+function sortEntityGroups(a: string, b: string): number {
+  if (a === 'Personal') return -1;
+  if (b === 'Personal') return 1;
+  if (a === 'Other') return 1;
+  if (b === 'Other') return -1;
+  return a.localeCompare(b);
 }
 
 export function TransactionTable({ transactions, accounts, categories, pageSize = 25, initialCategory }: TransactionTableProps) {
@@ -63,6 +74,17 @@ export function TransactionTable({ transactions, accounts, categories, pageSize 
     () => new Map(categories.map((c) => [c.id, c])),
     [categories]
   );
+
+  // Group categories by entity name for optgroup rendering
+  const categoriesByEntity = useMemo(() => {
+    const grouped = categories.reduce<Record<string, BudgetCategory[]>>((acc, cat) => {
+      const entityName = cat.entities?.name ?? 'Other';
+      if (!acc[entityName]) acc[entityName] = [];
+      acc[entityName].push(cat);
+      return acc;
+    }, {});
+    return Object.entries(grouped).sort(([a], [b]) => sortEntityGroups(a, b));
+  }, [categories]);
 
   const filtered = useMemo(() => {
     let result = transactions;
@@ -155,8 +177,12 @@ export function TransactionTable({ transactions, accounts, categories, pageSize 
         >
           <option value="all">All Categories</option>
           <option value="uncategorized">Uncategorized</option>
-          {categories.map((cat) => (
-            <option key={cat.id} value={cat.id}>{cat.name}</option>
+          {categoriesByEntity.map(([entityName, cats]) => (
+            <optgroup key={entityName} label={entityName}>
+              {cats.map((cat) => (
+                <option key={cat.id} value={cat.id}>{cat.name}</option>
+              ))}
+            </optgroup>
           ))}
         </select>
       </div>
@@ -254,10 +280,14 @@ export function TransactionTable({ transactions, accounts, categories, pageSize 
                             ? tx.plaid_category.join(' > ')
                             : 'Uncategorized'}
                         </option>
-                        {categories.map((cat) => (
-                          <option key={cat.id} value={cat.id}>
-                            {cat.name}
-                          </option>
+                        {categoriesByEntity.map(([entityName, cats]) => (
+                          <optgroup key={entityName} label={entityName}>
+                            {cats.map((cat) => (
+                              <option key={cat.id} value={cat.id}>
+                                {cat.name}
+                              </option>
+                            ))}
+                          </optgroup>
                         ))}
                       </select>
                       {userCategory && (

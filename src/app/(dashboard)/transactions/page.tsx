@@ -23,7 +23,7 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
       .is('deleted_at', null),
     supabase
       .from('budget_categories')
-      .select('id, name')
+      .select('id, name, entity_id, entities(name)')
       .eq('is_active', true)
       .order('name'),
     supabase

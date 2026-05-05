@@ -134,7 +134,43 @@ export async function syncTransactionsForItem(
     });
   }
 
-  // 6. Audit log
+  // 6. Refresh account balances via /accounts/balance/get
+  try {
+    const balanceResponse = await plaidClient.accountsBalanceGet({
+      access_token: accessToken,
+    });
+
+    const nowIso = new Date().toISOString();
+    for (const acct of balanceResponse.data.accounts) {
+      const accountId = accountMap.get(acct.account_id);
+      if (!accountId) continue;
+
+      const { error: balanceUpdateError } = await supabase
+        .from('accounts')
+        .update({
+          current_balance: acct.balances.current,
+          available_balance: acct.balances.available,
+          updated_at: nowIso,
+        })
+        .eq('id', accountId);
+
+      if (balanceUpdateError) {
+        logger.error('Failed to update account balance', {
+          plaid_item_id: plaidItemDbId,
+          account_id: accountId,
+          error_message: balanceUpdateError.message,
+        });
+      }
+    }
+  } catch (balanceError) {
+    // Non-fatal: transactions already synced. Surface for monitoring but don't fail the run.
+    logger.warn('Failed to refresh account balances', {
+      plaid_item_id: plaidItemDbId,
+      error_message: String(balanceError),
+    });
+  }
+
+  // 7. Audit log
   await writeAuditLog(supabase, {
     userId,
     action: 'PLAID_SYNC_COMPLETED',

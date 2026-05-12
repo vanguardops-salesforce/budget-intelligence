@@ -9,6 +9,13 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { formatCurrency, formatRelativeTime, maskAccount } from '@/lib/format';
 import {
+  formatBudgetMonth,
+  formatBudgetMonthRange,
+  getBudgetMonthRange,
+  getCurrentBudgetMonth,
+  toIsoDate,
+} from '@/lib/budgetMonth';
+import {
   DollarSign,
   Wallet,
   TrendingDown,
@@ -26,8 +33,15 @@ export default async function DashboardPage() {
   const supabase = createServerSupabaseClient();
 
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-  const today = now.toISOString().split('T')[0];
+  const budgetMonth = getCurrentBudgetMonth(now);
+  const { start: budgetMonthStart, end: budgetMonthEnd } = getBudgetMonthRange(budgetMonth);
+  const monthStart = toIsoDate(budgetMonthStart);
+  const monthEnd = toIsoDate(budgetMonthEnd);
+  const today = toIsoDate(now);
+  // Clamp the window to today so we don't query future dates.
+  const windowEnd = today < monthEnd ? today : monthEnd;
+  const budgetMonthLabel = formatBudgetMonth(budgetMonth);
+  const budgetMonthRangeLabel = formatBudgetMonthRange(budgetMonth);
 
   // Parallel data fetching
   const [entitiesRes, accountsRes, plaidItemsRes, txRes, txDetailRes, holdingsRes, recurringRes, incomeSourcesRes] = await Promise.all([
@@ -45,14 +59,14 @@ export default async function DashboardPage() {
       .select('amount')
       .is('deleted_at', null)
       .gte('date', monthStart)
-      .lte('date', today),
+      .lte('date', windowEnd),
     // Detailed transactions for tithing calculation
     supabase
       .from('transactions')
       .select('amount, date, merchant_name, entity_id, account_id')
       .is('deleted_at', null)
       .gte('date', monthStart)
-      .lte('date', today)
+      .lte('date', windowEnd)
       .order('date', { ascending: true }),
     supabase
       .from('holdings')
@@ -120,9 +134,12 @@ export default async function DashboardPage() {
     forecast30d += amt * occurrences;
   }
   // If no recurring patterns, estimate from MTD pace
+  const daysElapsedInBudgetMonth = Math.max(
+    1,
+    Math.floor((now.getTime() - budgetMonthStart.getTime()) / 86_400_000) + 1,
+  );
   if (recurringPatterns.length === 0 && mtdSpending > 0) {
-    const dayOfMonth = now.getDate();
-    const dailyRate = mtdSpending / dayOfMonth;
+    const dailyRate = mtdSpending / daysElapsedInBudgetMonth;
     forecast30d = dailyRate * 30;
   }
 
@@ -278,8 +295,8 @@ export default async function DashboardPage() {
             <div className="text-2xl font-bold text-green-600">
               {hasAccounts ? formatCurrency(mtdIncome) : '--'}
             </div>
-            <p className="text-xs text-muted-foreground">
-              {hasAccounts ? `Since ${monthStart}` : 'This month'}
+            <p className="text-xs text-muted-foreground" title={budgetMonthRangeLabel}>
+              {hasAccounts ? `${budgetMonthLabel} (${budgetMonthRangeLabel})` : 'This budget month'}
             </p>
           </CardContent>
         </Card>
@@ -293,8 +310,8 @@ export default async function DashboardPage() {
             <div className="text-2xl font-bold">
               {hasAccounts ? formatCurrency(mtdSpending) : '--'}
             </div>
-            <p className="text-xs text-muted-foreground">
-              {hasAccounts ? `Since ${monthStart}` : 'This month'}
+            <p className="text-xs text-muted-foreground" title={budgetMonthRangeLabel}>
+              {hasAccounts ? `${budgetMonthLabel} (${budgetMonthRangeLabel})` : 'This budget month'}
             </p>
           </CardContent>
         </Card>
@@ -350,7 +367,7 @@ export default async function DashboardPage() {
                 }))}
                 mtdSpending={mtdSpending}
                 mtdIncome={mtdIncome}
-                dayOfMonth={now.getDate()}
+                dayOfMonth={daysElapsedInBudgetMonth}
               />
             </CardContent>
           </Card>
@@ -371,8 +388,9 @@ export default async function DashboardPage() {
                   <Badge variant="secondary" className="bg-yellow-100 text-yellow-800">Gap</Badge>
                 )}
               </CardTitle>
-              <CardDescription>
-                Running ledger for {new Date(monthStart).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+              <CardDescription title={budgetMonthRangeLabel}>
+                Running ledger for {budgetMonthLabel}
+                <span className="block text-xs text-muted-foreground/80">{budgetMonthRangeLabel}</span>
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">

@@ -8,6 +8,12 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { computeFinancialState } from './financial-intelligence';
 import { fetchFundamentals } from '../market/fmp';
 import { logger } from '../logger';
+import {
+  formatBudgetMonth,
+  getBudgetMonthRange,
+  getCurrentBudgetMonth,
+  toIsoDate,
+} from '../budgetMonth';
 
 // ---------------------------------------------------------------------------
 // OpenAI Function Schemas
@@ -42,11 +48,11 @@ export const AI_FUNCTIONS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
           },
           date_from: {
             type: 'string',
-            description: 'Start date in YYYY-MM-DD format. Defaults to start of current month.',
+            description: 'Start date in YYYY-MM-DD format. Defaults to start of current budget month (the 11th).',
           },
           date_to: {
             type: 'string',
-            description: 'End date in YYYY-MM-DD format. Defaults to today.',
+            description: 'End date in YYYY-MM-DD format. Defaults to today (or end of budget month, whichever is sooner).',
           },
           merchant: {
             type: 'string',
@@ -172,13 +178,15 @@ async function executeGetTransactions(
   args: Record<string, unknown>
 ): Promise<string> {
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-    .toISOString()
-    .split('T')[0];
-  const today = now.toISOString().split('T')[0];
+  const budgetMonth = getCurrentBudgetMonth(now);
+  const { start: budgetMonthStart, end: budgetMonthEnd } = getBudgetMonthRange(budgetMonth);
+  const monthStart = toIsoDate(budgetMonthStart);
+  const monthEnd = toIsoDate(budgetMonthEnd);
+  const today = toIsoDate(now);
+  const defaultEnd = today < monthEnd ? today : monthEnd;
 
   const dateFrom = (args.date_from as string) || monthStart;
-  const dateTo = (args.date_to as string) || today;
+  const dateTo = (args.date_to as string) || defaultEnd;
   const limit = Math.min(Number(args.limit) || 25, 50);
 
   let query = supabase
@@ -243,10 +251,12 @@ async function executeGetBudgetStatus(
   args: Record<string, unknown>
 ): Promise<string> {
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-    .toISOString()
-    .split('T')[0];
-  const today = now.toISOString().split('T')[0];
+  const budgetMonth = getCurrentBudgetMonth(now);
+  const { start: budgetMonthStart, end: budgetMonthEnd } = getBudgetMonthRange(budgetMonth);
+  const monthStart = toIsoDate(budgetMonthStart);
+  const monthEnd = toIsoDate(budgetMonthEnd);
+  const today = toIsoDate(now);
+  const windowEnd = today < monthEnd ? today : monthEnd;
 
   // Get budget categories
   let budgetQuery = supabase
@@ -268,7 +278,7 @@ async function executeGetBudgetStatus(
       .eq('user_id', userId)
       .is('deleted_at', null)
       .gte('date', monthStart)
-      .lte('date', today)
+      .lte('date', windowEnd)
       .gt('amount', 0), // Spending only
   ]);
 
@@ -295,7 +305,9 @@ async function executeGetBudgetStatus(
   });
 
   return JSON.stringify({
-    month: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`,
+    budget_month: formatBudgetMonth(budgetMonth),
+    budget_month_start: monthStart,
+    budget_month_end: monthEnd,
     categories: status,
   });
 }

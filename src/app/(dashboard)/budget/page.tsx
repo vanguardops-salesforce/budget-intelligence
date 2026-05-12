@@ -3,6 +3,13 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { formatCurrency, formatRelativeTime } from '@/lib/format';
+import {
+  formatBudgetMonth,
+  formatBudgetMonthRange,
+  getBudgetMonthRange,
+  getCurrentBudgetMonth,
+  toIsoDate,
+} from '@/lib/budgetMonth';
 import { BudgetCategoryManager } from '@/components/budget-category-manager';
 import { BudgetPageTabs } from '@/components/budget-page-tabs';
 import { PieChart, AlertTriangle, CheckCircle2, Clock, Settings } from 'lucide-react';
@@ -11,11 +18,21 @@ export default async function BudgetPage() {
   const supabase = createServerSupabaseClient();
 
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-  const today = now.toISOString().split('T')[0];
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const dayOfMonth = now.getDate();
+  const budgetMonth = getCurrentBudgetMonth(now);
+  const { start: budgetMonthStart, end: budgetMonthEnd } = getBudgetMonthRange(budgetMonth);
+  const monthStart = toIsoDate(budgetMonthStart);
+  const monthEnd = toIsoDate(budgetMonthEnd);
+  const today = toIsoDate(now);
+  const windowEnd = today < monthEnd ? today : monthEnd;
+  // Total days in this budget month window, inclusive of both endpoints.
+  const daysInMonth = Math.round((budgetMonthEnd.getTime() - budgetMonthStart.getTime()) / 86_400_000) + 1;
+  const dayOfMonth = Math.min(
+    daysInMonth,
+    Math.max(1, Math.floor((now.getTime() - budgetMonthStart.getTime()) / 86_400_000) + 1),
+  );
   const monthProgress = Math.round((dayOfMonth / daysInMonth) * 100);
+  const monthName = formatBudgetMonth(budgetMonth);
+  const budgetMonthRangeLabel = formatBudgetMonthRange(budgetMonth);
 
   // Fetch categories, transactions, entities, and sync status in parallel
   const [categoriesRes, transactionsRes, plaidItemsRes, entitiesRes] = await Promise.all([
@@ -31,7 +48,7 @@ export default async function BudgetPage() {
       .select('amount, user_category_id, plaid_category')
       .is('deleted_at', null)
       .gte('date', monthStart)
-      .lte('date', today),
+      .lte('date', windowEnd),
     supabase
       .from('plaid_items')
       .select('last_successful_sync')
@@ -81,8 +98,6 @@ export default async function BudgetPage() {
   const totalBudget = budgetRows.reduce((sum, r) => sum + r.budget, 0);
   const totalSpent = budgetRows.reduce((sum, r) => sum + r.spent, 0) + uncategorizedSpending;
   const totalRemaining = totalBudget - totalSpent;
-
-  const monthName = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
   // Prepare categories for the manager component
   const managedCategories = allCategories.map((cat) => ({
@@ -271,7 +286,10 @@ export default async function BudgetPage() {
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-bold tracking-tight">Budget</h2>
-          <p className="text-muted-foreground">{monthName} — Day {dayOfMonth} of {daysInMonth}</p>
+          <p className="text-muted-foreground" title={budgetMonthRangeLabel}>
+            {monthName} — Day {dayOfMonth} of {daysInMonth}{' '}
+            <span className="text-xs text-muted-foreground/80">({budgetMonthRangeLabel})</span>
+          </p>
         </div>
         {lastSync && (
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">

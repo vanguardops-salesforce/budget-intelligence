@@ -5,6 +5,11 @@ import { NextResponse } from 'next/server';
 import { requireMFA } from '@/lib/supabase/auth-config';
 import { toClientError } from '@/lib/errors';
 import { logger } from '@/lib/logger';
+import {
+  getBudgetMonthRange,
+  getCurrentBudgetMonth,
+  toIsoDate,
+} from '@/lib/budgetMonth';
 
 export async function GET() {
   try {
@@ -18,8 +23,16 @@ export async function GET() {
     await requireMFA(supabase);
 
     const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-    const today = now.toISOString().split('T')[0];
+    const budgetMonth = getCurrentBudgetMonth(now);
+    const { start: budgetMonthStart, end: budgetMonthEnd } = getBudgetMonthRange(budgetMonth);
+    const monthStart = toIsoDate(budgetMonthStart);
+    const today = toIsoDate(now);
+    const monthEnd = toIsoDate(budgetMonthEnd);
+    const windowEnd = today < monthEnd ? today : monthEnd;
+    const daysElapsedInBudgetMonth = Math.max(
+      1,
+      Math.floor((now.getTime() - budgetMonthStart.getTime()) / 86_400_000) + 1,
+    );
 
     // Run all queries in parallel
     const [accountsRes, txRes, holdingsRes, plaidItemsRes, recurringRes] = await Promise.all([
@@ -33,7 +46,7 @@ export async function GET() {
         .select('amount, date, plaid_category')
         .is('deleted_at', null)
         .gte('date', monthStart)
-        .lte('date', today),
+        .lte('date', windowEnd),
       supabase
         .from('holdings')
         .select('value, cost_basis')
@@ -96,8 +109,7 @@ export async function GET() {
       forecast30d += amt * (freqMultiplier[pattern.frequency] ?? 1);
     }
     if (recurringPatterns.length === 0 && mtdSpending > 0) {
-      const dayOfMonth = now.getDate();
-      forecast30d = (mtdSpending / dayOfMonth) * 30;
+      forecast30d = (mtdSpending / daysElapsedInBudgetMonth) * 30;
     }
 
     return NextResponse.json({

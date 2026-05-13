@@ -1,12 +1,12 @@
 {
   "crons": [
     {
-      "path": "/api/sync/initial",
-      "schedule": "0 6 * * *"
+      "path": "/api/sync/transactions",
+      "schedule": "0 10 * * *"
     },
     {
       "path": "/api/sync/heal",
-      "schedule": "0 13 * * *"
+      "schedule": "0 3 * * *"
     },
     {
       "path": "/api/cron/snapshots",

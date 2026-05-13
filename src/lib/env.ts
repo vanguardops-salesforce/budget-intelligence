@@ -7,12 +7,17 @@ const publicSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().url(),
 });
 
+// Plaid environment — validated to prevent accidental misconfiguration
+const plaidEnvSchema = z.enum(['sandbox', 'development', 'production']);
+export type PlaidEnv = z.infer<typeof plaidEnvSchema>;
+
 // Server-only secrets — NEVER expose to browser
 const secretSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   PLAID_CLIENT_ID: z.string().min(1),
   PLAID_SECRET: z.string().min(1),
   PLAID_WEBHOOK_SECRET: z.string().min(1),
+  PLAID_ENV: plaidEnvSchema,
   OPENAI_API_KEY: z.string().startsWith('sk-'),
   FMP_API_KEY: z.string().min(1),
   ENCRYPTION_KEY: z.string().length(64),
@@ -40,6 +45,7 @@ export function getSecrets(): Secrets {
       PLAID_CLIENT_ID: process.env.PLAID_CLIENT_ID,
       PLAID_SECRET: process.env.PLAID_SECRET,
       PLAID_WEBHOOK_SECRET: process.env.PLAID_WEBHOOK_SECRET,
+      PLAID_ENV: process.env.PLAID_ENV,
       OPENAI_API_KEY: process.env.OPENAI_API_KEY,
       FMP_API_KEY: process.env.FMP_API_KEY,
       ENCRYPTION_KEY: process.env.ENCRYPTION_KEY,

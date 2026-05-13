@@ -1,6 +1,11 @@
 import { type SupabaseClient } from '@supabase/supabase-js';
 import type { FinancialState } from '../types';
 import { logger } from '../logger';
+import {
+  getBudgetMonthRange,
+  getCurrentBudgetMonth,
+  toIsoDate,
+} from '../budgetMonth';
 
 /**
  * Compute a compact FinancialState summary (~1,500 tokens) for AI context.
@@ -12,10 +17,16 @@ export async function computeFinancialState(
   userId: string
 ): Promise<FinancialState> {
   const now = new Date();
-  const today = now.toISOString().split('T')[0];
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-    .toISOString()
-    .split('T')[0];
+  const budgetMonth = getCurrentBudgetMonth(now);
+  const { start: budgetMonthStart, end: budgetMonthEnd } = getBudgetMonthRange(budgetMonth);
+  const today = toIsoDate(now);
+  const monthStart = toIsoDate(budgetMonthStart);
+  const monthEnd = toIsoDate(budgetMonthEnd);
+  const windowEnd = today < monthEnd ? today : monthEnd;
+  const daysElapsedInBudgetMonth = Math.max(
+    1,
+    Math.floor((now.getTime() - budgetMonthStart.getTime()) / 86_400_000) + 1,
+  );
 
   // Run all queries in parallel for performance
   const [
@@ -43,7 +54,7 @@ export async function computeFinancialState(
       .eq('user_id', userId)
       .is('deleted_at', null)
       .gte('date', monthStart)
-      .lte('date', today),
+      .lte('date', windowEnd),
     supabase
       .from('holdings')
       .select('entity_id, account_id, security_name, ticker, value, cost_basis')
@@ -116,9 +127,8 @@ export async function computeFinancialState(
     );
     const budgetVariance = totalBudget > 0 ? totalBudget - mtdSpending : 0;
 
-    // Runway: days of cash at current daily burn rate
-    const dayOfMonth = now.getDate();
-    const dailyBurn = dayOfMonth > 0 ? mtdSpending / dayOfMonth : 0;
+    // Runway: days of cash at current daily burn rate (using budget-month pace).
+    const dailyBurn = mtdSpending / daysElapsedInBudgetMonth;
     const runwayDays =
       dailyBurn > 0 ? Math.round(cashBalance / dailyBurn) : 9999;
 
@@ -149,7 +159,12 @@ export async function computeFinancialState(
     }));
 
   // --- Cash flow forecast ---
-  const forecast = computeCashFlowForecast(recurringPatterns, transactions, now);
+  const forecast = computeCashFlowForecast(
+    recurringPatterns,
+    transactions,
+    now,
+    daysElapsedInBudgetMonth,
+  );
 
   // --- Top spending categories ---
   const categorySpending = new Map<string, number>();
@@ -223,11 +238,12 @@ export function computeCashFlowForecast(
     confidence_score?: number;
   }>,
   transactions: Array<{ amount: number }>,
-  now: Date
+  now: Date,
+  daysElapsedInBudgetMonth?: number,
 ): { next_30_days: number; next_60_days: number; next_90_days: number } {
   if (recurringPatterns.length === 0) {
-    // Fallback: extrapolate from MTD spending pace
-    const dayOfMonth = now.getDate();
+    // Fallback: extrapolate from budget-month-to-date pace.
+    const daysElapsed = daysElapsedInBudgetMonth ?? Math.max(1, now.getDate());
     const mtdSpending = transactions
       .filter((t) => Number(t.amount) > 0)
       .reduce((sum, t) => sum + Number(t.amount), 0);
@@ -235,7 +251,7 @@ export function computeCashFlowForecast(
       .filter((t) => Number(t.amount) < 0)
       .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
 
-    const dailyNet = dayOfMonth > 0 ? (mtdIncome - mtdSpending) / dayOfMonth : 0;
+    const dailyNet = (mtdIncome - mtdSpending) / daysElapsed;
 
     return {
       next_30_days: round2(dailyNet * 30),

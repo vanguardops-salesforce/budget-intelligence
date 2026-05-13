@@ -13,10 +13,7 @@ import {
   Receipt,
   TrendingUp,
   MessageSquare,
-  Zap,
-  ScanSearch,
-  Receipt as ReceiptTax,
-  Wallet,
+  Filter,
   LogOut,
   Menu,
   X,
@@ -40,10 +37,7 @@ const NAV_ITEMS = [
   { href: '/budget', label: 'Budget', icon: PieChart },
   { href: '/transactions', label: 'Transactions', icon: Receipt },
   { href: '/portfolio', label: 'Portfolio', icon: TrendingUp },
-  { href: '/quick', label: 'Quick Check', icon: Zap },
-  { href: '/spending', label: 'Spending', icon: Wallet },
-  { href: '/subscriptions', label: 'Subscriptions', icon: ScanSearch },
-  { href: '/tax', label: 'Tax Strategy', icon: ReceiptTax },
+  { href: '/rules', label: 'Rules', icon: Filter },
   { href: '/ai', label: 'AI Coach', icon: MessageSquare },
 ];
 

@@ -9,9 +9,12 @@ const SENSITIVE_PATTERNS = [
   'cookie',
   'account_number',
   'routing_number',
+  'wire_routing',
+  'iban',
   'ssn',
   'encryption_key',
   'token',
+  'plaid_account_id',
 ];
 
 export function sanitizeForLog(data: Record<string, unknown>): Record<string, unknown> {

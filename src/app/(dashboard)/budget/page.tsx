@@ -1,46 +1,54 @@
-export const dynamic = "force-dynamic";
-
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { formatCurrency, formatRelativeTime } from '@/lib/format';
-import { BudgetRow } from '@/components/budget-row';
-import { PieChart, AlertTriangle, CheckCircle2, Clock } from 'lucide-react';
+import {
+  formatBudgetMonth,
+  formatBudgetMonthRange,
+  getBudgetMonthRange,
+  getCurrentBudgetMonth,
+  toIsoDate,
+} from '@/lib/budgetMonth';
+import { BudgetCategoryManager } from '@/components/budget-category-manager';
+import { BudgetPageTabs } from '@/components/budget-page-tabs';
+import { PieChart, AlertTriangle, CheckCircle2, Clock, Settings } from 'lucide-react';
 
 export default async function BudgetPage() {
   const supabase = createServerSupabaseClient();
 
   const now = new Date();
-  const day = now.getDate();
-  const periodStart = day >= 15
-    ? new Date(now.getFullYear(), now.getMonth(), 15)
-    : new Date(now.getFullYear(), now.getMonth() - 1, 15);
-  const periodEnd = day >= 15
-    ? new Date(now.getFullYear(), now.getMonth() + 1, 14)
-    : new Date(now.getFullYear(), now.getMonth(), 14);
-  const monthStart = periodStart.toISOString().split('T')[0];
-  const today = now.toISOString().split('T')[0];
-  const periodDays = Math.round((periodEnd.getTime() - periodStart.getTime()) / 86400000);
-  const elapsedDays = Math.round((now.getTime() - periodStart.getTime()) / 86400000);
-  const daysInMonth = periodDays;
-  const dayOfMonth = elapsedDays;
-  const monthProgress = Math.round((elapsedDays / periodDays) * 100);
-  const periodLabel = `${periodStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${periodEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+  const budgetMonth = getCurrentBudgetMonth(now);
+  const { start: budgetMonthStart, end: budgetMonthEnd } = getBudgetMonthRange(budgetMonth);
+  const monthStart = toIsoDate(budgetMonthStart);
+  const monthEnd = toIsoDate(budgetMonthEnd);
+  const today = toIsoDate(now);
+  const windowEnd = today < monthEnd ? today : monthEnd;
+  // Total days in this budget month window, inclusive of both endpoints.
+  const daysInMonth = Math.round((budgetMonthEnd.getTime() - budgetMonthStart.getTime()) / 86_400_000) + 1;
+  const dayOfMonth = Math.min(
+    daysInMonth,
+    Math.max(1, Math.floor((now.getTime() - budgetMonthStart.getTime()) / 86_400_000) + 1),
+  );
+  const monthProgress = Math.round((dayOfMonth / daysInMonth) * 100);
+  const monthName = formatBudgetMonth(budgetMonth);
+  const budgetMonthRangeLabel = formatBudgetMonthRange(budgetMonth);
 
-  // Fetch categories, transactions, sync status, and entities in parallel
+  // Fetch categories, transactions, entities, and sync status in parallel
   const [categoriesRes, transactionsRes, plaidItemsRes, entitiesRes] = await Promise.all([
     supabase
       .from('budget_categories')
-      .select('id, name, entity_id, monthly_budget_amount, is_active, rationale')
-      .eq('is_active', true)
+      .select(`
+        id, name, entity_id, monthly_budget_amount, is_active, created_at,
+        entities!budget_categories_entity_id_fkey(name)
+      `)
       .order('name'),
     supabase
       .from('transactions')
       .select('amount, user_category_id, plaid_category')
       .is('deleted_at', null)
       .gte('date', monthStart)
-      .lte('date', today),
+      .lte('date', windowEnd),
     supabase
       .from('plaid_items')
       .select('last_successful_sync')
@@ -48,19 +56,16 @@ export default async function BudgetPage() {
       .limit(1),
     supabase
       .from('entities')
-      .select('id, name')
-      .eq('is_active', true),
+      .select('id, name, type')
+      .eq('is_active', true)
+      .order('name'),
   ]);
 
-  const categories = categoriesRes.data ?? [];
+  const allCategories = categoriesRes.data ?? [];
+  const activeCategories = allCategories.filter((c) => c.is_active);
   const transactions = transactionsRes.data ?? [];
   const lastSync = plaidItemsRes.data?.[0]?.last_successful_sync;
   const entities = entitiesRes.data ?? [];
-  const entityMap = new Map(entities.map(e => [e.id, e.name]));
-
-  // Filter out non-spending categories
-  const hiddenCategories = ['Income', 'Credit Card Payments', 'Insurance - IUL'];
-  const visibleCategories = categories.filter(c => !hiddenCategories.includes(c.name));
 
   // Build spending by category
   const spendingByCategory = new Map<string, number>();
@@ -81,46 +86,32 @@ export default async function BudgetPage() {
   }
 
   // Enrich categories with actual spending
-  const budgetRows = visibleCategories.map((cat) => {
+  const budgetRows = activeCategories.map((cat) => {
     const spent = spendingByCategory.get(cat.id) || 0;
     const budget = Number(cat.monthly_budget_amount) || 0;
     const pct = budget > 0 ? Math.min(Math.round((spent / budget) * 100), 100) : 0;
     const remaining = budget - spent;
     const overBudget = spent > budget && budget > 0;
-    const entityName = entityMap.get(cat.entity_id) || 'Unknown';
-    return { ...cat, spent, budget, pct, remaining, overBudget, entityName };
+    return { ...cat, spent, budget, pct, remaining, overBudget };
   });
 
-  // Group by entity
-  const budgetByEntity = new Map<string, typeof budgetRows>();
-  for (const row of budgetRows) {
-    const existing = budgetByEntity.get(row.entityName) || [];
-    existing.push(row);
-    budgetByEntity.set(row.entityName, existing);
-  }
-
   const totalBudget = budgetRows.reduce((sum, r) => sum + r.budget, 0);
-  const totalCategories = visibleCategories.length;
   const totalSpent = budgetRows.reduce((sum, r) => sum + r.spent, 0) + uncategorizedSpending;
   const totalRemaining = totalBudget - totalSpent;
 
-  const monthName = periodLabel;
+  // Prepare categories for the manager component
+  const managedCategories = allCategories.map((cat) => ({
+    id: cat.id,
+    entity_id: cat.entity_id,
+    name: cat.name,
+    monthly_budget_amount: cat.monthly_budget_amount ? Number(cat.monthly_budget_amount) : null,
+    is_active: cat.is_active,
+    entity_name: (cat.entities as unknown as { name: string } | null)?.name ?? 'Unknown',
+  }));
 
-  return (
+  // Tracking tab content
+  const trackingContent = (
     <div className="space-y-6">
-      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">Budget</h2>
-          <p className="text-muted-foreground">{monthName} — Day {dayOfMonth} of {daysInMonth}</p>
-        </div>
-        {lastSync && (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Clock className="h-3.5 w-3.5" />
-            Last synced {formatRelativeTime(lastSync)}
-          </div>
-        )}
-      </div>
-
       {/* Month summary cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <Card>
@@ -131,7 +122,7 @@ export default async function BudgetPage() {
           <CardContent>
             <div className="text-2xl font-bold">{formatCurrency(totalBudget)}</div>
             <p className="text-xs text-muted-foreground">
-              {totalCategories} active categories
+              {activeCategories.length} active categories
             </p>
           </CardContent>
         </Card>
@@ -184,63 +175,134 @@ export default async function BudgetPage() {
       </Card>
 
       {/* Budget vs Actual */}
-      {categories.length === 0 ? (
+      {activeCategories.length === 0 ? (
         <Card>
           <CardContent className="py-8">
             <p className="text-center text-sm text-muted-foreground">
-              No budget categories configured. Run the seed SQL to create default categories.
+              No budget categories configured. Switch to the Setup tab to create categories and set monthly amounts.
             </p>
           </CardContent>
         </Card>
       ) : (
-        <>
-          {Array.from(budgetByEntity.entries()).map(([entityName, rows]) => (
-            <Card key={entityName}>
-              <CardHeader>
-                <CardTitle>{entityName}</CardTitle>
-                <CardDescription>Budget vs actual for {entityName}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-6">
-                  {rows.map((row) => (
-                    <BudgetRow
-                      key={row.id}
-                      id={row.id}
-                      name={row.name}
-                      spent={row.spent}
-                      budget={row.budget}
-                      pct={row.pct}
-                      remaining={row.remaining}
-                      overBudget={row.overBudget}
-                      rationale={row.rationale}
-                    />
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-
-          {/* Uncategorized spending */}
-          {uncategorizedSpending > 0 && (
-            <Card>
-              <CardContent className="py-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-muted-foreground">Uncategorized</span>
-                    <Badge variant="secondary" className="text-[10px]">Unassigned</Badge>
+        <Card>
+          <CardHeader>
+            <CardTitle>Budget vs Actual</CardTitle>
+            <CardDescription>Monthly budget tracking by category</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-6">
+              {budgetRows.map((row) => (
+                <div key={row.id} className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{row.name}</span>
+                      {row.overBudget && (
+                        <Badge variant="danger" className="text-[10px]">Over</Badge>
+                      )}
+                    </div>
+                    <div className="text-right">
+                      <span className="text-sm font-semibold tabular-nums">
+                        {formatCurrency(row.spent)}
+                      </span>
+                      <span className="text-sm text-muted-foreground">
+                        {' / '}{row.budget > 0 ? formatCurrency(row.budget) : 'No budget'}
+                      </span>
+                    </div>
                   </div>
-                  <span className="text-sm font-semibold tabular-nums">
-                    {formatCurrency(uncategorizedSpending)}
-                  </span>
+                  <Progress
+                    value={row.pct}
+                    className="h-2.5"
+                    indicatorClassName={
+                      row.overBudget
+                        ? 'bg-destructive'
+                        : row.pct > 80
+                        ? 'bg-yellow-500'
+                        : 'bg-green-500'
+                    }
+                  />
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>{row.pct}% used</span>
+                    <span>
+                      {row.remaining >= 0
+                        ? `${formatCurrency(row.remaining)} remaining`
+                        : `${formatCurrency(Math.abs(row.remaining))} over`}
+                    </span>
+                  </div>
                 </div>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Assign categories to transactions for better tracking.
-                </p>
-              </CardContent>
-            </Card>
-          )}
-        </>
+              ))}
+
+              {/* Uncategorized spending */}
+              {uncategorizedSpending > 0 && (
+                <>
+                  <div className="border-t pt-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-muted-foreground">Uncategorized</span>
+                        <Badge variant="secondary" className="text-[10px]">Unassigned</Badge>
+                      </div>
+                      <span className="text-sm font-semibold tabular-nums">
+                        {formatCurrency(uncategorizedSpending)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Assign categories to transactions or create rules for auto-categorization.
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          </CardContent>
+        </Card>
       )}
+    </div>
+  );
+
+  // Setup tab content
+  const setupContent = (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <Settings className="h-5 w-5 text-muted-foreground" />
+          <div>
+            <CardTitle>Budget Categories</CardTitle>
+            <CardDescription>
+              Define categories and set monthly budget amounts per entity.
+              Click on a budget amount in the table to edit it inline.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <BudgetCategoryManager
+          categories={managedCategories}
+          entities={entities}
+        />
+      </CardContent>
+    </Card>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">Budget</h2>
+          <p className="text-muted-foreground" title={budgetMonthRangeLabel}>
+            {monthName} — Day {dayOfMonth} of {daysInMonth}{' '}
+            <span className="text-xs text-muted-foreground/80">({budgetMonthRangeLabel})</span>
+          </p>
+        </div>
+        {lastSync && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Clock className="h-3.5 w-3.5" />
+            Last synced {formatRelativeTime(lastSync)}
+          </div>
+        )}
+      </div>
+
+      <BudgetPageTabs
+        trackingContent={trackingContent}
+        setupContent={setupContent}
+      />
     </div>
   );
 }

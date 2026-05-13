@@ -1,10 +1,12 @@
+export const dynamic = "force-dynamic";
+
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { TransactionTable } from '@/components/transaction-table';
 import { formatCurrency, formatRelativeTime } from '@/lib/format';
 import { Receipt, ArrowDownLeft, ArrowUpRight, Clock } from 'lucide-react';
 
-export default async function TransactionsPage() {
+export default async function TransactionsPage({ searchParams }: { searchParams: { category?: string } }) {
   const supabase = createServerSupabaseClient();
 
   const [transactionsRes, accountsRes, categoriesRes, plaidItemsRes] = await Promise.all([
@@ -21,7 +23,7 @@ export default async function TransactionsPage() {
       .is('deleted_at', null),
     supabase
       .from('budget_categories')
-      .select('id, name')
+      .select('id, name, entity_id, entities(name)')
       .eq('is_active', true)
       .order('name'),
     supabase
@@ -110,6 +112,7 @@ export default async function TransactionsPage() {
             transactions={transactions}
             accounts={accounts}
             categories={categories}
+            initialCategory={searchParams.category}
           />
         </CardContent>
       </Card>

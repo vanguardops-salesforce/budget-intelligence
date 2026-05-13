@@ -74,7 +74,7 @@ export function checkRateLimit(config: RateLimitConfig, identifier: string): Rat
 // Pre-configured rate limiters matching the spec
 export const RATE_LIMITS = {
   AI_CHAT: { name: 'ai-chat', maxRequests: 10, windowMs: 60_000 },
-  PLAID_LINK: { name: 'plaid-link', maxRequests: 3, windowMs: 60_000 },
+  PLAID_LINK: { name: 'plaid-link', maxRequests: 10, windowMs: 60_000 },
   WEBHOOK: { name: 'webhook', maxRequests: 100, windowMs: 60_000 },
   FINANCIAL_STATE: { name: 'financial-state', maxRequests: 20, windowMs: 60_000 },
   TRANSACTIONS: { name: 'transactions', maxRequests: 60, windowMs: 60_000 },

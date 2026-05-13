@@ -39,7 +39,7 @@ export async function GET(request: Request) {
     }
 
     // Deduplicate user IDs
-    const uniqueUserIds = [...new Set((users ?? []).map((u: { user_id: string }) => u.user_id))];
+    const uniqueUserIds = Array.from(new Set((users ?? []).map((u: { user_id: string }) => u.user_id)));
 
     if (uniqueUserIds.length === 0) {
       logger.info('Snapshot cron: no active users found');

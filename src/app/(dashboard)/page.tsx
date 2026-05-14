@@ -153,14 +153,29 @@ export default async function DashboardPage() {
     return tithePatterns.some((p) => lower.includes(p));
   }
 
+  // Production stores income_sources.merchant_patterns as TEXT (Postgres array
+  // literal string like `{%FOO%,"%BAR%"}`) even though migration 003 declares
+  // it TEXT[]. Supabase REST returns whatever the column is, so we accept both
+  // shapes here. Note: naive comma-split would mis-handle a quoted entry that
+  // itself contains a comma; the schema fix that aligns the column with the
+  // migration file is the real long-term answer.
+  function parseMerchantPatterns(raw: unknown): string[] {
+    if (Array.isArray(raw)) return raw as string[];
+    if (typeof raw !== 'string' || raw.length === 0) return [];
+    const inner = raw.startsWith('{') && raw.endsWith('}') ? raw.slice(1, -1) : raw;
+    return inner
+      .split(',')
+      .map((p) => p.trim().replace(/^"|"$/g, '').replace(/%/g, ''))
+      .filter(Boolean);
+  }
+
   function isIncomeDeposit(merchantName: string | null): boolean {
     if (!merchantName) return false;
     const lower = merchantName.toLowerCase();
-    return incomeSources.some((src) =>
-      (src.merchant_patterns as string[]).some((pattern: string) =>
-        lower.includes(pattern.toLowerCase())
-      )
-    );
+    return incomeSources.some((src) => {
+      const patterns = parseMerchantPatterns(src.merchant_patterns);
+      return patterns.some((pattern) => lower.includes(pattern.toLowerCase()));
+    });
   }
 
   // Identify income deposits and tithe payments for the period

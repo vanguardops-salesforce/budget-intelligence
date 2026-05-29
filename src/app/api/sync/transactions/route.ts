@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSecrets } from '@/lib/env';
 import { createServiceRoleClient } from '@/lib/supabase/server';
 import { syncTransactionsForItem, recordSyncFailure } from '@/lib/plaid/sync';
+import { runDataHealthAudit } from '@/lib/audit/runner';
 import { logger } from '@/lib/logger';
 
 /**
@@ -41,13 +42,11 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Internal error.' }, { status: 500 });
     }
 
-    if (!pendingEvents || pendingEvents.length === 0) {
-      return NextResponse.json({ status: 'ok', processed: 0 });
-    }
-
-    // Group events by plaid_item_id to deduplicate
+    // Group events by plaid_item_id to deduplicate. The daily cron still runs
+    // the Data Health audit below even when there are no pending events.
+    const events = pendingEvents ?? [];
     const itemEventMap = new Map<string, string[]>();
-    for (const event of pendingEvents) {
+    for (const event of events) {
       const existing = itemEventMap.get(event.plaid_item_id) || [];
       existing.push(event.id);
       itemEventMap.set(event.plaid_item_id, existing);
@@ -132,14 +131,23 @@ export async function GET(request: Request) {
     logger.info('Transaction sync cron completed', {
       items_processed: totalProcessed,
       items_errored: totalErrors,
-      events_total: pendingEvents.length,
+      events_total: events.length,
+    });
+
+    // Run the Data Health audit right after the sync, regardless of whether any
+    // events were processed. Audit failures must never crash the cron.
+    const audit = await runDataHealthAuditForAllUsers(supabase, {
+      ok: totalErrors === 0,
+      itemsProcessed: totalProcessed,
+      itemsErrored: totalErrors,
     });
 
     return NextResponse.json({
       status: 'ok',
       processed: totalProcessed,
       errors: totalErrors,
-      events: pendingEvents.length,
+      events: events.length,
+      audit,
     });
   } catch (error) {
     logger.error('Transaction sync cron error', { error_message: String(error) });
@@ -166,4 +174,44 @@ async function markEvents(
     .from('plaid_webhook_events')
     .update(updates)
     .in('id', eventIds);
+}
+
+/**
+ * Run the Data Health audit for every user that owns active accounts. Mirrors
+ * the snapshot cron's user-discovery. Per-user failures are logged but never
+ * propagate — the audit must not crash the sync cron.
+ */
+async function runDataHealthAuditForAllUsers(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  syncState: { ok: boolean; itemsProcessed: number; itemsErrored: number }
+): Promise<{ users: number; failed: number }> {
+  const { data: accountRows, error } = await supabase
+    .from('accounts')
+    .select('user_id')
+    .eq('is_active', true)
+    .is('deleted_at', null);
+
+  if (error) {
+    logger.error('Audit: failed to list users', { error_message: error.message });
+    return { users: 0, failed: 0 };
+  }
+
+  const userIds = Array.from(
+    new Set((accountRows ?? []).map((r: { user_id: string }) => r.user_id))
+  );
+
+  let failed = 0;
+  for (const userId of userIds) {
+    try {
+      await runDataHealthAudit(supabase, userId, 'cron', syncState);
+    } catch (err) {
+      failed++;
+      logger.error('Audit run failed for user', {
+        user_id: userId,
+        error_message: String(err),
+      });
+    }
+  }
+
+  return { users: userIds.length, failed };
 }

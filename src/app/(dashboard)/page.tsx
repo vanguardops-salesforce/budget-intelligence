@@ -4,6 +4,8 @@ import { NetWorthChart } from '@/components/net-worth-chart';
 import { CashFlowForecast } from '@/components/cash-flow-forecast';
 import { ConnectionHealth } from '@/components/connection-health';
 import { AccountEntityAssignment } from '@/components/account-entity-assignment';
+import { DataHealthPanel } from '@/components/data-health-panel';
+import { getLatestAudit, type LatestAudit } from '@/lib/audit/runner';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
@@ -31,6 +33,17 @@ import {
 
 export default async function DashboardPage() {
   const supabase = createServerSupabaseClient();
+
+  const { data: { user } } = await supabase.auth.getUser();
+  let latestAudit: LatestAudit | null = null;
+  if (user) {
+    try {
+      latestAudit = await getLatestAudit(supabase, user.id);
+    } catch {
+      // Audit history is non-critical to the dashboard — render the panel empty.
+      latestAudit = null;
+    }
+  }
 
   const now = new Date();
   const budgetMonth = getCurrentBudgetMonth(now);
@@ -350,6 +363,20 @@ export default async function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Data Health self-audit */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Data Health</CardTitle>
+          <CardDescription>
+            Automated nightly integrity audit — unclassified deposits, tithe gaps, stale balances,
+            duplicates, and Plaid connection health.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <DataHealthPanel initial={latestAudit} />
+        </CardContent>
+      </Card>
 
       {/* Net Worth Trend & Cash Flow Forecast */}
       {hasAccounts && (

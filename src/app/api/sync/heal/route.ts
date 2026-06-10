@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSecrets } from '@/lib/env';
 import { createServiceRoleClient } from '@/lib/supabase/server';
 import { syncTransactionsForItem, recordSyncFailure } from '@/lib/plaid/sync';
+import { generateDailySnapshots, type SnapshotRunResult } from '@/lib/snapshots';
 import { logger } from '@/lib/logger';
 
 /**
@@ -92,12 +93,24 @@ export async function GET(request: Request) {
       errors: totalErrors,
     });
 
+    // Write daily financial snapshots now that balances are fresh.
+    // Piggybacks on this cron because Vercel Hobby only schedules two
+    // cron jobs per project. A snapshot failure must not fail the heal job.
+    let snapshots: SnapshotRunResult | { error: string };
+    try {
+      snapshots = await generateDailySnapshots(supabase);
+    } catch (error) {
+      logger.error('Snapshot generation failed after heal', { error_message: String(error) });
+      snapshots = { error: 'Snapshot generation failed.' };
+    }
+
     return NextResponse.json({
       status: 'ok',
       total: items.length,
       healed: totalHealed,
       errors: totalErrors,
       results,
+      snapshots,
     });
   } catch (error) {
     logger.error('Heal job cron error', { error_message: String(error) });

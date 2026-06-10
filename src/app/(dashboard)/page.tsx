@@ -18,6 +18,12 @@ import {
   toIsoDate,
 } from '@/lib/budgetMonth';
 import {
+  aggregateTitheAllTime,
+  buildRunningLedger,
+  sumCycleTotals,
+  type TitheLedgerRow,
+} from '@/lib/titheLedger';
+import {
   DollarSign,
   Wallet,
   TrendingDown,
@@ -57,7 +63,7 @@ export default async function DashboardPage() {
   const budgetMonthRangeLabel = formatBudgetMonthRange(budgetMonth);
 
   // Parallel data fetching
-  const [entitiesRes, accountsRes, plaidItemsRes, txRes, txDetailRes, holdingsRes, recurringRes, incomeSourcesRes] = await Promise.all([
+  const [entitiesRes, accountsRes, plaidItemsRes, txRes, titheLogRes, holdingsRes, recurringRes] = await Promise.all([
     supabase.from('entities').select('id, name, type').eq('is_active', true),
     supabase
       .from('accounts')
@@ -73,14 +79,12 @@ export default async function DashboardPage() {
       .is('deleted_at', null)
       .gte('date', monthStart)
       .lte('date', windowEnd),
-    // Detailed transactions for tithing calculation
+    // Canonical tithing ledger — both tithing panels read from this.
     supabase
-      .from('transactions')
-      .select('amount, date, merchant_name, entity_id, account_id')
-      .is('deleted_at', null)
-      .gte('date', monthStart)
-      .lte('date', windowEnd)
-      .order('date', { ascending: true }),
+      .from('tithe_log')
+      .select('entity_id, income_date, income_source, tithe_owed, tithe_paid, status')
+      .not('income_date', 'is', null)
+      .order('income_date', { ascending: true }),
     supabase
       .from('holdings')
       .select('value')
@@ -89,20 +93,14 @@ export default async function DashboardPage() {
       .from('recurring_patterns')
       .select('estimated_amount, frequency, next_expected_date')
       .eq('is_active', true),
-    supabase
-      .from('income_sources')
-      .select('id, name, entity_id, merchant_patterns')
-      .eq('is_active', true),
   ]);
 
   const entities = entitiesRes.data ?? [];
   const accounts = accountsRes.data ?? [];
   const plaidItems = plaidItemsRes.data ?? [];
   const transactions = txRes.data ?? [];
-  const detailedTransactions = txDetailRes.data ?? [];
   const holdings = holdingsRes.data ?? [];
   const recurringPatterns = recurringRes.data ?? [];
-  const incomeSources = incomeSourcesRes.data ?? [];
 
   // Compute metrics
   const totalCash = accounts
@@ -156,93 +154,26 @@ export default async function DashboardPage() {
     forecast30d = dailyRate * 30;
   }
 
-  // ── Tithing calculation (running ledger) ──
-  const TITHE_RATE = 0.10;
-  const tithePatterns = ['north point', 'community ch'];
+  // ── Tithing — single source of truth is tithe_log; never recompute paid here ──
+  const titheLedgerRows: TitheLedgerRow[] = (titheLogRes.data ?? []).map((r) => ({
+    entityId: r.entity_id as string,
+    incomeDate: r.income_date as string,
+    incomeSource: (r.income_source as string | null) ?? null,
+    titheOwed: Number(r.tithe_owed) || 0,
+    tithePaid: Number(r.tithe_paid) || 0,
+    status: (r.status as string) ?? 'owed',
+  }));
 
-  function isTithePayment(merchantName: string | null): boolean {
-    if (!merchantName) return false;
-    const lower = merchantName.toLowerCase();
-    return tithePatterns.some((p) => lower.includes(p));
-  }
+  const entityNameById = new Map(entities.map((e) => [e.id, e.name]));
 
-  // Production stores income_sources.merchant_patterns as TEXT (Postgres array
-  // literal string like `{%FOO%,"%BAR%"}`) even though migration 003 declares
-  // it TEXT[]. Supabase REST returns whatever the column is, so we accept both
-  // shapes here. Note: naive comma-split would mis-handle a quoted entry that
-  // itself contains a comma; the schema fix that aligns the column with the
-  // migration file is the real long-term answer.
-  function parseMerchantPatterns(raw: unknown): string[] {
-    if (Array.isArray(raw)) return raw as string[];
-    if (typeof raw !== 'string' || raw.length === 0) return [];
-    const inner = raw.startsWith('{') && raw.endsWith('}') ? raw.slice(1, -1) : raw;
-    return inner
-      .split(',')
-      .map((p) => p.trim().replace(/^"|"$/g, '').replace(/%/g, ''))
-      .filter(Boolean);
-  }
+  // Running ledger: this cycle's unpaid rows, remaining read verbatim from the ledger.
+  const runningLedger = buildRunningLedger(titheLedgerRows, budgetMonth, entityNameById);
+  const { owed: totalTitheOwed, paid: totalTithePaid } = sumCycleTotals(titheLedgerRows, budgetMonth);
+  const tithingIsCurrent = runningLedger.length === 0;
+  const tithingGap = runningLedger.reduce((sum, e) => sum + e.remaining, 0);
 
-  function isIncomeDeposit(merchantName: string | null): boolean {
-    if (!merchantName) return false;
-    const lower = merchantName.toLowerCase();
-    return incomeSources.some((src) => {
-      const patterns = parseMerchantPatterns(src.merchant_patterns);
-      return patterns.some((pattern) => lower.includes(pattern.toLowerCase()));
-    });
-  }
-
-  // Identify income deposits and tithe payments for the period
-  const incomeDeposits = detailedTransactions
-    .filter((t) => Number(t.amount) < 0 && isIncomeDeposit(t.merchant_name))
-    .map((t) => ({
-      amount: Math.abs(Number(t.amount)),
-      titheOwed: Math.abs(Number(t.amount)) * TITHE_RATE,
-      date: t.date as string,
-      source: t.merchant_name as string,
-      entityId: t.entity_id as string,
-    }));
-
-  const tithePayments = detailedTransactions
-    .filter((t) => Number(t.amount) > 0 && isTithePayment(t.merchant_name))
-    .map((t) => ({
-      amount: Number(t.amount),
-      date: t.date as string,
-      entityId: t.entity_id as string,
-    }));
-
-  // Running ledger: apply tithe payments against income deposits in chronological order
-  const totalTitheOwed = incomeDeposits.reduce((sum, d) => sum + d.titheOwed, 0);
-  const totalTithePaid = tithePayments.reduce((sum, p) => sum + p.amount, 0);
-
-  // Determine which paychecks are uncovered
-  let runningCredit = totalTithePaid;
-  const uncoveredDeposits: typeof incomeDeposits = [];
-  for (const deposit of incomeDeposits) {
-    if (runningCredit >= deposit.titheOwed) {
-      runningCredit -= deposit.titheOwed;
-    } else {
-      // Partially or fully uncovered
-      const uncoveredAmount = deposit.titheOwed - runningCredit;
-      uncoveredDeposits.push({ ...deposit, titheOwed: uncoveredAmount });
-      runningCredit = 0;
-    }
-  }
-
-  const tithingIsCurrent = totalTithePaid >= totalTitheOwed;
-  const tithingGap = Math.max(0, totalTitheOwed - totalTithePaid);
-
-  // Entity-level tithing breakdown
-  const entityTithingMap = new Map<string, { owed: number; paid: number }>();
-  for (const deposit of incomeDeposits) {
-    const entry = entityTithingMap.get(deposit.entityId) ?? { owed: 0, paid: 0 };
-    entry.owed += deposit.titheOwed;
-    entityTithingMap.set(deposit.entityId, entry);
-  }
-  for (const payment of tithePayments) {
-    const entry = entityTithingMap.get(payment.entityId) ?? { owed: 0, paid: 0 };
-    entry.paid += payment.amount;
-    entityTithingMap.set(payment.entityId, entry);
-  }
+  // Entity tracker: all-time (cumulative) owed vs paid over the same ledger rows.
+  const entityTithing = aggregateTitheAllTime(titheLedgerRows);
 
   const hasAccounts = accounts.length > 0;
 
@@ -417,7 +348,7 @@ export default async function DashboardPage() {
       )}
 
       {/* Tithing — 10% */}
-      {hasAccounts && incomeSources.length > 0 && (
+      {hasAccounts && titheLedgerRows.length > 0 && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {/* Daily Briefing: Tithing alerts */}
           <Card>
@@ -443,16 +374,17 @@ export default async function DashboardPage() {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {uncoveredDeposits.map((deposit, i) => (
+                  {runningLedger.map((entry, i) => (
                     <div key={i} className="flex items-start gap-2 rounded-lg border border-yellow-200 bg-yellow-50 p-3">
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-yellow-600" />
                       <div className="text-sm">
                         <span className="font-medium text-yellow-800">
-                          Tithe {formatCurrency(deposit.titheOwed)}
+                          Tithe {formatCurrency(entry.remaining)}
                         </span>
                         <span className="text-yellow-700">
-                          {' '}for {deposit.source} payment on{' '}
-                          {new Date(deposit.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          {' '}for {entry.incomeSource ?? entityNameById.get(entry.entityId) ?? 'income'} payment on{' '}
+                          {new Date(entry.incomeDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          {entry.status === 'partial' && ' (partially paid)'}
                         </span>
                       </div>
                     </div>
@@ -475,18 +407,16 @@ export default async function DashboardPage() {
           <Card>
             <CardHeader>
               <CardTitle>Tithing Tracker</CardTitle>
-              <CardDescription>Breakdown by entity</CardDescription>
+              <CardDescription>All-time owed vs paid, by entity</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                {Array.from(entityTithingMap.entries()).map(([entityId, { owed, paid }]) => {
-                  const entity = entities.find((e) => e.id === entityId);
+                {entityTithing.map(({ entityId, owed, paid, gap: entityGap }) => {
                   const entityCurrent = paid >= owed;
-                  const entityGap = Math.max(0, owed - paid);
                   return (
                     <div key={entityId} className="rounded-lg border p-3">
                       <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium">{entity?.name ?? 'Unknown'}</span>
+                        <span className="text-sm font-medium">{entityNameById.get(entityId) ?? 'Unknown'}</span>
                         {entityCurrent ? (
                           <Badge variant="secondary" className="bg-green-100 text-green-800 text-xs">
                             Current
@@ -503,8 +433,8 @@ export default async function DashboardPage() {
                     </div>
                   );
                 })}
-                {entityTithingMap.size === 0 && (
-                  <p className="text-sm text-muted-foreground">No income recorded this period.</p>
+                {entityTithing.length === 0 && (
+                  <p className="text-sm text-muted-foreground">No income recorded.</p>
                 )}
               </div>
             </CardContent>

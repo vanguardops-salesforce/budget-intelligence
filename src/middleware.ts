@@ -49,8 +49,8 @@ export async function middleware(request: NextRequest) {
     return response;
   }
 
-  // Cron endpoints verify CRON_SECRET in the route handler — skip session check here
-  if (pathname.startsWith('/api/sync/')) {
+// Cron endpoints verify CRON_SECRET in the route handler — skip session check here
+  if (pathname.startsWith('/api/sync/') || pathname.startsWith('/api/cron/')) {
     return response;
   }
 

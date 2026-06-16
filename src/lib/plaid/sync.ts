@@ -10,7 +10,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { RemovedTransaction, Transaction as PlaidTransaction } from 'plaid';
+import { AccountBase, RemovedTransaction, Transaction as PlaidTransaction } from 'plaid';
 import { getPlaidClient } from './client';
 import { decrypt } from '../crypto';
 import { logger } from '../logger';
@@ -83,6 +83,7 @@ export async function syncTransactionsForItem(
   let totalAdded = 0;
   let totalModified = 0;
   let totalRemoved = 0;
+  let latestAccounts: AccountBase[] = [];
 
   while (hasMore) {
     const response = await plaidClient.transactionsSync({
@@ -92,6 +93,7 @@ export async function syncTransactionsForItem(
     });
 
     const { added, modified, removed, next_cursor, has_more } = response.data;
+    latestAccounts = response.data.accounts;
 
     if (added.length > 0) {
       await upsertTransactions(supabase, added, userId, entityId, accountMap);
@@ -112,6 +114,31 @@ export async function syncTransactionsForItem(
     hasMore = has_more;
   }
 
+  // Persist account balances from the sync response. Non-fatal per account:
+  // transactions are already synced, so log failures and continue.
+  const balanceUpdatedAt = new Date().toISOString();
+  for (const plaidAcct of latestAccounts) {
+    const accountId = accountMap.get(plaidAcct.account_id);
+    if (!accountId) continue;
+
+    const { error: balanceError } = await supabase
+      .from('accounts')
+      .update({
+        current_balance: plaidAcct.balances.current,
+        available_balance: plaidAcct.balances.available,
+        updated_at: balanceUpdatedAt,
+      })
+      .eq('id', accountId);
+
+    if (balanceError) {
+      logger.error('Failed to update account balance from sync response', {
+        plaid_item_id: plaidItemDbId,
+        account_id: accountId,
+        error_message: balanceError.message,
+      });
+    }
+  }
+
   // 5. Update cursor and sync timestamp
   const { error: updateError } = await supabase
     .from('plaid_items')
@@ -130,7 +157,44 @@ export async function syncTransactionsForItem(
     });
   }
 
-  // 6. Audit log
+  // 6. Refresh account balances via /accounts/balance/get so the stored
+  //    snapshot (and its updated_at) stays fresh. Non-fatal: transactions are
+  //    already synced, so surface failures for monitoring without failing the run.
+  try {
+    const balanceResponse = await plaidClient.accountsBalanceGet({
+      access_token: accessToken,
+    });
+
+    const nowIso = new Date().toISOString();
+    for (const acct of balanceResponse.data.accounts) {
+      const accountId = accountMap.get(acct.account_id);
+      if (!accountId) continue;
+
+      const { error: balanceUpdateError } = await supabase
+        .from('accounts')
+        .update({
+          current_balance: acct.balances.current,
+          available_balance: acct.balances.available,
+          updated_at: nowIso,
+        })
+        .eq('id', accountId);
+
+      if (balanceUpdateError) {
+        logger.error('Failed to update account balance', {
+          plaid_item_id: plaidItemDbId,
+          account_id: accountId,
+          error_message: balanceUpdateError.message,
+        });
+      }
+    }
+  } catch (balanceError) {
+    logger.warn('Failed to refresh account balances', {
+      plaid_item_id: plaidItemDbId,
+      error_message: String(balanceError),
+    });
+  }
+
+  // 7. Audit log
   await writeAuditLog(supabase, {
     userId,
     action: 'PLAID_SYNC_COMPLETED',

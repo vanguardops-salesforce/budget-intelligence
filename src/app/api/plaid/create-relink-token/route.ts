@@ -57,19 +57,15 @@ export async function POST(request: Request) {
 
     // Decrypt the access token
     const serviceClient = createServiceRoleClient();
-    const { data: tokenRow, error: tokenError } = await serviceClient
-      .schema('private')
-      .from('plaid_tokens')
-      .select('access_token_encrypted')
-      .eq('plaid_item_id', plaidItem.id)
-      .single();
+    const { data: encryptedToken, error: tokenError } = await serviceClient
+      .rpc('get_plaid_token', { p_plaid_item_id: plaidItem.id });
 
-    if (tokenError || !tokenRow) {
+    if (tokenError || !encryptedToken) {
       logger.error('Failed to fetch token for re-link', { plaid_item_id: plaidItem.id });
       return NextResponse.json({ error: 'Failed to retrieve credentials.' }, { status: 500 });
     }
 
-    const accessToken = decrypt(tokenRow.access_token_encrypted);
+    const accessToken = decrypt(encryptedToken);
 
     const plaidClient = getPlaidClient();
     const webhookUrl = `${publicEnv.NEXT_PUBLIC_APP_URL}/api/plaid/webhook`;

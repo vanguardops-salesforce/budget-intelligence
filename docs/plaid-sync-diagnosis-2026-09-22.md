@@ -333,39 +333,73 @@ audit framework, so it runs nightly after the sync and flows into
 
 - `src/lib/audit/checks.ts` — `checkSilentSyncFailure()`, a pure function
 - `src/lib/audit/config.ts` — `SILENT_SYNC_MAX_TXN_AGE_DAYS = 5`,
-  `SILENT_SYNC_FRESH_SYNC_HOURS = 36`
+  `SILENT_SYNC_FRESH_SYNC_HOURS = 36`,
+  `SILENT_SYNC_BALANCE_TOLERANCE_HOURS = 24`
 - `src/lib/audit/runner.ts` — wired into the nightly run
-- `src/lib/audit/silentSync.test.ts` — 9 tests
+- `src/lib/audit/silentSync.test.ts` — 14 tests
 
-An item is flagged `critical` when **both** hold:
+An item is **reported** when both hold:
 
 1. it is *claiming* success — `last_successful_sync` is within 36h (staler items
    are already reported by Check E, so they are not double-reported); **and**
 2. the newest transaction across its non-deleted accounts is more than 5 days
    old, **or it has never ingested one at all**.
 
-Check E asks "did the sync run?". Check G asks "did the sync produce data?" —
-the question that would have caught this on 2026-08-11 instead of 2026-09-22.
+Severity is then **graded on whether the run actually wrote an account row**,
+which is what separates a broken connection from a merely quiet one.
+`syncTransactionsForItem` persists balances from the same `/transactions/sync`
+response it ingests transactions from (`sync.ts:117-140`), so on any run that
+genuinely reached the institution `accounts.updated_at` lands within seconds of
+`last_successful_sync`:
 
-### What it flags against production today
+| balance lag | meaning | severity |
+|---|---|---|
+| > 24h | the run stamped success without writing any account row — transactions are being dropped | **critical** |
+| ≈ 0 | the sync reached Plaid and Plaid had nothing new — normally a quiet account | **warn** |
 
-| institution | status | last "successful" sync | newest txn | days | verdict |
+This grading is the difference between a check that gets acted on and one that
+gets ignored. Without it the check fires `critical` on every quiet savings
+account — and a check that cries wolf is how the original failure survived six
+weeks unnoticed.
+
+### What it reports against production today
+
+| institution | status | newest txn | days | balance lag | verdict |
 |---|---|---|---|---|---|
-| Capital One | degraded | 2026-09-22 03:20 | 2026-08-08 | 45 | **FLAG** |
-| Citibank Online | **connected** | 2026-09-22 03:20 | 2026-09-09 | 13 | **FLAG** |
-| Chase | **connected** | 2026-09-22 03:20 | 2026-09-11 | 11 | **FLAG** |
-| Navy Federal | degraded | 2026-09-22 03:21 | 2026-09-15 | 7 | **FLAG** |
-| USAA | connected | 2026-09-22 03:21 | 2026-09-18 | 4 | ok |
-| Navy Federal | connected | 2026-09-22 03:21 | 2026-09-18 | 4 | ok |
-| American Express `82883c40` | degraded | 2026-09-22 03:21 | 2026-09-20 | 2 | ok |
-| American Express `6aa22001` | reauth_required | 2026-08-14 | 2026-08-09 | 44 | skip → Check E |
-| American Express `18dedaa2` | degraded | 2026-08-14 | 2026-08-10 | 43 | skip → Check E |
+| Capital One `ccffe6d8` | degraded | 2026-08-08 | 45 | **1032h** | **CRITICAL — dropping transactions** |
+| Citibank Online `54417f43` | connected | 2026-09-09 | 13 | 0h | warn — quiet account |
+| Chase `b6861fdd` | connected | 2026-09-11 | 11 | 0h | warn — quiet account |
+| Navy Federal `7ac74dfa` | degraded | 2026-09-15 | 7 | 0h | warn — quiet account |
 
-**The problem is wider than the one item you flagged.** Citibank and Chase are
-both `connected` with `error_count = 0`, `last_error_code NULL`, and a green
-"synced today" — and neither has ingested a transaction in over a week. They
-show the same signature as Capital One and were invisible to every existing
-check.
+Items skipped as already covered by Check E: Amex `6aa22001` (44 days) and Amex
+`18dedaa2` (43 days), both with stale syncs.
 
 `scripts/silent-sync-check.sql` is the standalone read-only version of this
 query for ad-hoc use.
+
+---
+
+## Follow-up: are the other three items also broken?
+
+**No — and the distinction matters.** Investigated read-only at your request.
+
+The `PLAID_SYNC_COMPLETED` audit trail shows Citibank, Chase and Navy Federal
+`7ac74dfa` receiving `added: 0` from Plaid on most nights, with genuine activity
+interspersed — Navy Federal took `added: 6, removed: 3` on 9/10, `added: 1` on
+9/11, 9/13 and 9/17, and `modified: 1` as recently as 9/22; Chase took `added: 1`
+on 9/11, 9/12 and 9/13; Citibank `added: 1` on 9/11. Their balances are
+refreshed every night (lag 0h) and their stored balances are current.
+
+That is the opposite of Capital One, which received `added: 254` and wrote
+**none** of it, with balances frozen since 8/10.
+
+The account names explain the quiet: `Citi® Accelerate Savings` is a savings
+account, Navy Federal `7ac74dfa` is `Business Savings` (no transactions ever)
+plus `Business Checking`, and Chase is a single low-volume card. Low transaction
+counts are expected.
+
+So: **one genuine silent failure (Capital One), three quiet-but-healthy items.**
+The `warn` rows are worth a glance — an 11–13 day gap on a checking or card
+account would be odd — but nothing in the data suggests they are broken. Navy
+Federal `7ac74dfa` reading `degraded` is the sticky-status bug from finding 1(b),
+not a live fault.

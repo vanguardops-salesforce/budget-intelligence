@@ -17,6 +17,7 @@ import {
   EXPECTED_ACCOUNT_NAME_FRAGMENTS,
   SILENT_SYNC_MAX_TXN_AGE_DAYS,
   SILENT_SYNC_FRESH_SYNC_HOURS,
+  SILENT_SYNC_BALANCE_TOLERANCE_HOURS,
 } from './config';
 import { isClassifiedIncome } from './patterns';
 import { balanceAgeDays, estimateAccountBalance } from './balance';
@@ -34,6 +35,7 @@ import type {
   AuditTitheRow,
   AuditTransaction,
   Finding,
+  Severity,
 } from './types';
 
 const MAX_DETAIL_ROWS = 100;
@@ -306,12 +308,26 @@ export { titheBudgetMonthLabel };
  * matching `accounts` row: they are dropped with a warning, the cursor still
  * advances, and the run is recorded as a success.
  *
- * An item is flagged when BOTH hold:
+ * An item is reported when BOTH hold:
  *   1. it claims success — last_successful_sync is within
  *      SILENT_SYNC_FRESH_SYNC_HOURS (items staler than that are Check E's job,
  *      so they are not double-reported here); and
  *   2. the newest transaction across its non-deleted accounts is older than
  *      SILENT_SYNC_MAX_TXN_AGE_DAYS — or it has no transactions at all.
+ *
+ * Severity is then graded on whether the sync actually touched the account
+ * rows, which is what separates a broken connection from a quiet one:
+ *
+ *   critical — the newest accounts.updated_at lags last_successful_sync by more
+ *     than SILENT_SYNC_BALANCE_TOLERANCE_HOURS. The run never wrote an account,
+ *     so its "success" is not backed by any ingested data at all.
+ *   warn — balances were refreshed on the same run, so the sync demonstrably
+ *     reached the institution and Plaid simply had nothing new. Normal for a
+ *     savings account or an unused card; surfaced for review, not alarm.
+ *
+ * Grading matters: without it this check fires `critical` on every quiet
+ * savings account, and a check that cries wolf is a check that gets ignored —
+ * which is how the original failure went unnoticed for six weeks.
  *
  * Items with no accounts rows at all are skipped: there is nothing to compare
  * against, and Check E's missing-account arm covers that case.
@@ -322,7 +338,8 @@ export function checkSilentSyncFailure(
   transactions: AuditTransaction[],
   now: Date = new Date(),
   maxTxnAgeDays: number = SILENT_SYNC_MAX_TXN_AGE_DAYS,
-  freshSyncHours: number = SILENT_SYNC_FRESH_SYNC_HOURS
+  freshSyncHours: number = SILENT_SYNC_FRESH_SYNC_HOURS,
+  balanceToleranceHours: number = SILENT_SYNC_BALANCE_TOLERANCE_HOURS
 ): Finding[] {
   // Newest transaction date per account, as a plain YYYY-MM-DD string compare
   // (transactions.date is a DATE column, so lexical order is chronological).
@@ -343,13 +360,19 @@ export function checkSilentSyncFailure(
   }
 
   const freshMs = freshSyncHours * 3_600_000;
-  const rows: Array<Record<string, unknown>> = [];
+  const toleranceMs = balanceToleranceHours * 3_600_000;
+
+  interface Row extends Record<string, unknown> {
+    daysSinceNewestTransaction: number | null;
+    balancesStale: boolean;
+  }
+  const rows: Row[] = [];
 
   for (const item of plaidItems) {
     // 1. Must be claiming a recent success.
     if (!item.last_successful_sync) continue;
-    const syncAgeMs = now.getTime() - new Date(item.last_successful_sync).getTime();
-    if (syncAgeMs > freshMs) continue; // stale — Check E owns this one
+    const syncMs = new Date(item.last_successful_sync).getTime();
+    if (now.getTime() - syncMs > freshMs) continue; // stale — Check E owns this one
 
     const itemAccounts = accountsByItem.get(item.id) ?? [];
     if (itemAccounts.length === 0) continue; // nothing to measure
@@ -368,6 +391,17 @@ export function checkSilentSyncFailure(
 
     if (txnAgeDays !== null && txnAgeDays <= maxTxnAgeDays) continue; // healthy
 
+    // 3. Did the run actually write an account row? Balances are persisted from
+    //    the same response the transactions come from, so a snapshot that lags
+    //    the claimed sync means the sync never reached these accounts.
+    let newestBalanceMs = -Infinity;
+    for (const a of itemAccounts) {
+      const t = new Date(a.updated_at).getTime();
+      if (!Number.isNaN(t) && t > newestBalanceMs) newestBalanceMs = t;
+    }
+    const balancesStale =
+      newestBalanceMs === -Infinity || syncMs - newestBalanceMs > toleranceMs;
+
     rows.push({
       institution: item.institution_name ?? 'Unknown institution',
       plaidItemId: item.id,
@@ -375,29 +409,47 @@ export function checkSilentSyncFailure(
       lastSuccessfulSync: item.last_successful_sync,
       newestTransaction: newest,
       daysSinceNewestTransaction: txnAgeDays,
+      balancesStale,
+      balanceLagHours:
+        newestBalanceMs === -Infinity
+          ? null
+          : Math.max(0, Math.round((syncMs - newestBalanceMs) / 3_600_000)),
+      diagnosis: balancesStale
+        ? 'Sync reported success without writing any account row — transactions are being dropped (likely an unmapped plaid_account_id).'
+        : 'Sync reached the institution and refreshed balances; Plaid returned no new transactions. Likely a genuinely quiet account.',
       accounts: itemAccounts.map((a) => a.name),
     });
   }
 
   if (rows.length === 0) return [];
 
+  // Proven failures first; then never-ingested, then oldest data first.
   rows.sort((a, b) => {
-    // Never-ingested items first, then oldest data first.
-    const aDays = a.daysSinceNewestTransaction as number | null;
-    const bDays = b.daysSinceNewestTransaction as number | null;
+    if (a.balancesStale !== b.balancesStale) return a.balancesStale ? -1 : 1;
+    const aDays = a.daysSinceNewestTransaction;
+    const bDays = b.daysSinceNewestTransaction;
     if (aDays === null) return bDays === null ? 0 : -1;
     if (bDays === null) return 1;
     return bDays - aDays;
   });
 
+  const broken = rows.filter((r) => r.balancesStale);
+  const severity: Severity = broken.length > 0 ? 'critical' : 'warn';
+  const title =
+    broken.length > 0
+      ? 'Sync reports success but is ingesting nothing'
+      : 'No new transactions since last successful sync';
+
   return [{
     checkKey: 'silent_sync_failure',
-    severity: 'critical',
-    title: 'Sync reports success but no new transactions',
+    severity,
+    title,
     detail: {
       rows: rows.slice(0, MAX_DETAIL_ROWS),
       truncated: rows.length > MAX_DETAIL_ROWS,
       thresholdDays: maxTxnAgeDays,
+      confirmedFailures: broken.length,
+      quietAccounts: rows.length - broken.length,
     },
     itemCount: rows.length,
     totalAmount: 0,

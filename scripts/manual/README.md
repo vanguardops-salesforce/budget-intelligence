@@ -1,54 +1,83 @@
 # Manual production steps — Plaid sync recovery
 
-Run **in order**. Nothing here runs automatically; each step is deliberately
-manual because it changes production data or production Plaid items.
+Run **in order**. Nothing here runs automatically; each step changes production
+data or production Plaid items.
 
 | # | File | What it does | When |
 |---|---|---|---|
-| 1 | `01-stop-amex-retry-loop.sql` | Sets Amex `18dedaa2` → `reauth_required` | Any time — safe before deploy |
-| 2 | `02-recover-capital-one.sql` | Resets the Capital One cursor to re-pull lost history | **Only after** the fix is deployed and §A passes |
+| 0 | `00-hold-capital-one.sql` | Parks Capital One so no sync touches it | **Before merging the PR** |
+| 1 | `01-stop-amex-retry-loop.sql` | Sets Amex `18dedaa2` → `reauth_required` | Any time |
+| 2 | `02-recover-capital-one.sql` | Re-points the account, resets the cursor, dedupe preflight | After deploy, §A first |
 | 3 | `03-webhook-backfill.ts` | Registers the webhook URL on the 8 legacy items | After deploy; dry-run first |
 
-Supporting, read-only: `../verify-account-mapping.ts` compares Plaid's current
-`account_id`s against `accounts` rows, and `../silent-sync-check.sql` is the
-standalone form of the Data Health check.
+Read-only helpers: `../verify-account-mapping.ts` (which account ids Plaid
+returns vs. what we hold), `../probe-transaction-ids.ts` (were transaction_ids
+reissued — decides whether the cursor reset is safe), and
+`../silent-sync-check.sql`.
 
-## Order matters
+## The two things that make ordering matter
 
-Step 2 is the one with a hard precondition. Clearing `transactions_cursor`
-makes the next sync replay the item's full history; if the account mapping is
-still broken when that happens, the replay lands in the same hole. With the fix
-deployed the run now aborts loudly rather than dropping rows, so the failure is
-visible either way — but you still have to fix the mapping before the data
-lands. §A of that file is the check.
+**1. The nightly heal job runs at 03:00 UTC** and sweeps every item with status
+`connected` or `degraded`. Capital One is `degraded`, so it is in that set. If
+the heal runs after the fix is deployed but before the account row is
+re-pointed, the pre-sync refresh creates a *second* accounts row under the new
+`plaid_account_id` — and then re-pointing the original fails, because
+`accounts.plaid_account_id` is UNIQUE and the new id is taken.
 
-The mapping largely repairs itself once deployed: every sync now reconciles
-`accounts` against Plaid first, creating any account that is missing. Step 2 §B
-covers the one thing the code will not do on its own — deciding that an old
-account row and a newly created one are the same physical card, and merging
-their history. That is a judgement call, so it is left to you.
+Step 0 parks the item (`status = 'disconnected'`) so the sweep skips it. It
+works before and after the deploy, which is why it is used rather than the
+post-deploy `error_count` ceiling. Scope is Capital One only; everything else
+keeps syncing. The hold is released in 02 §C.
+
+**2. A cursor reset is only idempotent if Plaid still returns the same
+`transaction_id`s.** Transactions upsert on `plaid_transaction_id` (UNIQUE). If
+the 2026-09-21 relink reissued transaction ids along with the account ids, a
+reset re-pulls the full history under ids that match nothing, and duplicates
+every existing row instead of updating it.
+
+`probe-transaction-ids.ts` answers this before you commit to anything: it asks
+Plaid for a window we already hold and compares the id sets. **STABLE** →
+proceed. **REISSUED** → stop at 02 §E; the originals carry 643 categorisations
+and 248 recurring links, so they cannot simply be replaced.
 
 ## Recommended sequence
 
-1. Deploy the fix (merge PR #18).
-2. `npx tsx --env-file=.env.local scripts/verify-account-mapping.ts` — see which
-   items have accounts Plaid knows about that we do not.
-3. Run `01-stop-amex-retry-loop.sql`, then re-link the Amex card in the UI.
-4. Let one nightly sync run (or trigger `/api/sync/heal` by hand). The account
-   refresh creates the missing Capital One account row.
-5. Work through `02-recover-capital-one.sql` §A → §B (if it applies) → §C.
+1. **Run `00-hold-capital-one.sql`** — before anything else, while the PR is
+   still unmerged.
+2. Merge PR #18 and let it deploy.
+3. Read the two probes:
+   ```
+   npx tsx --env-file=.env.local scripts/verify-account-mapping.ts ccffe6d8-3b5c-4da5-a02b-c166359b436e
+   npx tsx --env-file=.env.local scripts/probe-transaction-ids.ts  ccffe6d8-3b5c-4da5-a02b-c166359b436e
+   ```
+   The first prints the new `plaid_account_id` (a `MISSING` line). The second
+   gives the STABLE / REISSUED verdict.
+4. Run `01-stop-amex-retry-loop.sql`, then re-link the Amex card in the UI.
+5. Work through `02-recover-capital-one.sql`: §A → §B (re-point) → §E1
+   (baseline) → §C (release hold + reset cursor) → §D (verify) → §E2/E3.
 6. Dry-run `03-webhook-backfill.ts`, review the plan, then `--apply`.
 7. Confirm `../silent-sync-check.sql` returns no critical rows.
 
+Capital One's history stays attached to one account row throughout — no second
+row, no merge step, `entity_id` never rewritten.
+
 ## Rollback
 
-Steps 1 and 2 are wrapped in explicit transactions with a `ROLLBACK` line
-commented out beside each `COMMIT`; verify the `SELECT` output before
-committing. Step 3 is idempotent and re-runnable — re-pointing a webhook URL
-has no effect on stored data, and can be reverted by running it again against a
-different `NEXT_PUBLIC_APP_URL`.
+Steps 0, 1 and 2 are transaction-wrapped with a `ROLLBACK` line commented out
+beside each `COMMIT`, and each ends with a `SELECT` to check before committing.
+Every `UPDATE` is guarded on the expected current state, so re-running a step
+that already applied reports `UPDATE 0` rather than doing something unexpected.
 
-The cursor reset in step 2 §C is the only step that is not trivially
-reversible, and it is non-destructive in practice: transactions upsert on
-`plaid_transaction_id` (UNIQUE), so a replay updates rows in place rather than
-duplicating them. The previous cursor is written to `audit_log` first.
+To abandon the recovery after step 0, restore the item:
+
+```sql
+UPDATE plaid_items SET status = 'degraded', updated_at = NOW()
+WHERE id = 'ccffe6d8-3b5c-4da5-a02b-c166359b436e';
+```
+
+The cursor reset in 02 §C is the only step that is not trivially reversible;
+the previous cursor is written to `audit_log` first, so it can be restored by
+hand. Step 3 is idempotent and re-runnable.
+
+**No file in this directory deletes a transaction.** 02 §E reports duplicates
+and stops.

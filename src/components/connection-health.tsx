@@ -36,11 +36,13 @@ interface ConnectionHealthProps {
 export function ConnectionHealth({ plaidItems }: ConnectionHealthProps) {
   const [relinkingId, setRelinkingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const router = useRouter();
 
   const handleRelink = useCallback(async (plaidItemId: string) => {
     setRelinkingId(plaidItemId);
     setError(null);
+    setNotice(null);
 
     try {
       // 1. Get a re-link token
@@ -57,12 +59,40 @@ export function ConnectionHealth({ plaidItems }: ConnectionHealthProps) {
 
       const { link_token } = await tokenRes.json();
 
-      // 2. Open Plaid Link in update mode
-      await openPlaidLinkForReauth(link_token);
+      // 2. Open Plaid Link in update mode. Resolves true only when Plaid
+      //    reports success; a voluntary close resolves false.
+      const succeeded = await openPlaidLinkForReauth(link_token);
 
-      // 3. On success, mark item as re-connected on backend
-      // (Plaid handles this automatically via webhook — the update mode flow
-      // sends an ITEM webhook with code LOGIN_REPAIRED)
+      if (!succeeded) {
+        // User closed the dialog without finishing — nothing to persist.
+        setRelinkingId(null);
+        return;
+      }
+
+      // 3. Persist the result. This is required, not optional: no webhook
+      //    repairs the item for us. The endpoint upserts any newly selected
+      //    accounts, clears the error state, and requeues webhook events that
+      //    were failed while the item was in reauth.
+      const completeRes = await fetch('/api/plaid/relink-complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plaid_item_id: plaidItemId }),
+      });
+
+      if (!completeRes.ok) {
+        const data = await completeRes.json().catch(() => ({}));
+        throw new Error(
+          data.error || 'Re-authentication succeeded but the connection could not be updated.'
+        );
+      }
+
+      const result = await completeRes.json();
+      setNotice(
+        result.accounts_created > 0
+          ? `Reconnected. Added ${result.accounts_created} new account${result.accounts_created === 1 ? '' : 's'}.`
+          : 'Reconnected.'
+      );
+
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Re-link failed.');
@@ -106,6 +136,12 @@ export function ConnectionHealth({ plaidItems }: ConnectionHealthProps) {
       {error && (
         <div className="rounded-md bg-red-50 p-3">
           <p className="text-sm text-red-700">{error}</p>
+        </div>
+      )}
+
+      {notice && (
+        <div className="rounded-md bg-green-50 p-3">
+          <p className="text-sm text-green-700">{notice}</p>
         </div>
       )}
 
@@ -218,8 +254,12 @@ function ItemStatusBadge({ status }: { status: string }) {
 
 /**
  * Open Plaid Link in update/re-auth mode.
+ *
+ * Resolves true when Plaid reports success, false when the user closes the
+ * dialog voluntarily. The caller needs that distinction: only a real success
+ * should trigger the relink-complete write.
  */
-function openPlaidLinkForReauth(linkToken: string): Promise<void> {
+function openPlaidLinkForReauth(linkToken: string): Promise<boolean> {
   return new Promise((resolve, reject) => {
     const plaidWindow = window as Window & {
       Plaid?: {
@@ -241,14 +281,14 @@ function openPlaidLinkForReauth(linkToken: string): Promise<void> {
       const handler = plaid.create({
         token: linkToken,
         onSuccess: () => {
-          resolve();
+          resolve(true);
           handler.destroy();
         },
         onExit: (err) => {
           if (err) {
             reject(new Error('Re-authentication cancelled.'));
           } else {
-            resolve(); // User closed voluntarily — not an error
+            resolve(false); // User closed voluntarily — not an error
           }
           handler.destroy();
         },

@@ -20,6 +20,53 @@ export const STALE_BALANCE_MAX_AGE_DAYS = 3;
 export const PLAID_ITEM_STALE_HOURS = 36;
 
 /**
+ * Check G — silent sync failure ("green light, no data").
+ *
+ * An item whose last_successful_sync is recent is *claiming* health. If its
+ * accounts have nevertheless received no new transaction in more than this many
+ * days, the sync is reporting success while ingesting nothing — the exact
+ * failure mode that let Capital One item ccffe6d8 drop 254 transactions on
+ * 2026-09-22 while showing a green "synced today".
+ *
+ * 5 days is deliberately wider than a long holiday weekend, so a genuinely
+ * quiet card does not trip the check.
+ */
+export const SILENT_SYNC_MAX_TXN_AGE_DAYS = 5;
+
+/**
+ * Check G — how recent last_successful_sync must be for an item to count as
+ * "claiming success". Items staler than this are already reported by Check E,
+ * so they are excluded here to avoid double-reporting the same connection.
+ */
+export const SILENT_SYNC_FRESH_SYNC_HOURS = 36;
+
+/**
+ * Check G — how far an item's newest account balance snapshot may lag its
+ * last_successful_sync before we conclude the sync never actually touched the
+ * account rows.
+ *
+ * This is the discriminator between the two ways an item can have no new
+ * transactions. `syncTransactionsForItem` persists balances (and so bumps
+ * accounts.updated_at) from the same /transactions/sync response it ingests
+ * transactions from, so on any run that genuinely reached the institution the
+ * two timestamps land within seconds of each other:
+ *
+ *   - balances fresh  → the sync really did reach Plaid and Plaid returned no
+ *     new transactions. Usually a genuinely quiet account (a savings account,
+ *     a card that went unused). Reported as `warn`.
+ *   - balances stale  → the run stamped last_successful_sync without ever
+ *     writing an account row, which is what happens when Plaid returns data
+ *     for a plaid_account_id that has no matching `accounts` row: the rows are
+ *     dropped, the cursor still advances, and the run is recorded as a success.
+ *     Reported as `critical`.
+ *
+ * On 2026-09-22 this cleanly separated Capital One ccffe6d8 (balances 1038h
+ * stale, 254 transactions silently dropped) from Chase, Citi and Navy Federal
+ * (balances 6h fresh, genuinely quiet accounts).
+ */
+export const SILENT_SYNC_BALANCE_TOLERANCE_HOURS = 24;
+
+/**
  * Check D — known-legitimate repeated charges to exclude from duplicate
  * detection. Matched as a case-insensitive substring against merchant_name.
  *   - Delta: multiple airline tickets purchased same day at the same price.

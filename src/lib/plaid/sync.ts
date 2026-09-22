@@ -4,23 +4,39 @@
  *
  * Pipeline:
  * 1. Decrypt the access token from private.plaid_tokens
- * 2. Call Plaid /transactions/sync with the cursor
- * 3. Upsert added/modified transactions, soft-delete removed ones
- * 4. Update the cursor and sync timestamp on plaid_items
+ * 2. Reconcile `accounts` against Plaid so the account map is complete
+ * 3. Call Plaid /transactions/sync with the cursor
+ * 4. Upsert added/modified transactions, soft-delete removed ones
+ * 5. Commit the cursor and mark the item healthy — only if every transaction
+ *    was mapped to an account and written
+ *
+ * The invariant that matters: the cursor is committed only after the rows on
+ * that page are durably stored. /transactions/sync never re-offers a page, so
+ * advancing past unwritten rows loses them permanently.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { AccountBase, RemovedTransaction, Transaction as PlaidTransaction } from 'plaid';
 import { getPlaidClient } from './client';
+import { refreshAccountsForItem } from './accounts';
+import {
+  extractPlaidError,
+  requiresReauth,
+  UnknownAccountError,
+  UNMAPPED_ACCOUNT_ERROR_CODE,
+} from './errors';
 import { decrypt } from '../crypto';
 import { logger } from '../logger';
 import { writeAuditLog } from '../audit';
 
 export interface SyncResult {
+  /** Rows actually written to `transactions`, not the size of Plaid's page. */
   added: number;
   modified: number;
   removed: number;
   cursor: string;
+  /** plaid_account_ids created by the pre-sync account refresh. */
+  createdAccounts: string[];
 }
 
 /**
@@ -61,21 +77,18 @@ export async function syncTransactionsForItem(
 
   const accessToken = decrypt(encryptedToken);
 
-  // 3. Build account lookup map (plaid_account_id → account UUID)
-  const { data: accounts, error: acctError } = await supabase
-    .from('accounts')
-    .select('id, plaid_account_id')
-    .eq('plaid_item_id', plaidItemDbId)
-    .is('deleted_at', null);
-
-  if (acctError) {
-    throw new Error(`Failed to fetch accounts for plaid_item ${plaidItemDbId}: ${acctError.message}`);
-  }
-
-  const accountMap = new Map<string, string>();
-  for (const acct of accounts || []) {
-    accountMap.set(acct.plaid_account_id, acct.id);
-  }
+  // 3. Reconcile accounts with Plaid BEFORE ingesting anything, so the map
+  //    covers accounts added or reissued since the last run. Building it from
+  //    whatever rows happened to exist is what silently dropped 254 Capital One
+  //    transactions after a relink changed the item's account_ids.
+  const { accountMap, deletedAccountIds, createdAccountIds } = await refreshAccountsForItem(
+    supabase,
+    plaidClient,
+    accessToken,
+    plaidItemDbId,
+    userId,
+    entityId
+  );
 
   // 4. Paginate through /transactions/sync
   let cursor = plaidItem.transactions_cursor || '';
@@ -96,13 +109,15 @@ export async function syncTransactionsForItem(
     latestAccounts = response.data.accounts;
 
     if (added.length > 0) {
-      await upsertTransactions(supabase, added, userId, entityId, accountMap);
-      totalAdded += added.length;
+      totalAdded += await upsertTransactions(
+        supabase, added, userId, entityId, accountMap, plaidItemDbId, deletedAccountIds
+      );
     }
 
     if (modified.length > 0) {
-      await upsertTransactions(supabase, modified, userId, entityId, accountMap);
-      totalModified += modified.length;
+      totalModified += await upsertTransactions(
+        supabase, modified, userId, entityId, accountMap, plaidItemDbId, deletedAccountIds
+      );
     }
 
     if (removed.length > 0) {
@@ -139,22 +154,37 @@ export async function syncTransactionsForItem(
     }
   }
 
-  // 5. Update cursor and sync timestamp
+  // 5. Commit the cursor and mark the item healthy.
+  //
+  //    Reached only when every transaction on every page mapped to an account
+  //    and was written — upsertTransactions throws otherwise — so stamping
+  //    last_successful_sync here genuinely means "this data is stored".
+  //
+  //    `status` is reset alongside the error fields. Without it an item that
+  //    crossed the failure threshold stayed 'degraded' forever, which is why
+  //    healthy items read degraded with error_count 0 and last_error_code NULL.
   const { error: updateError } = await supabase
     .from('plaid_items')
     .update({
       transactions_cursor: cursor,
       last_successful_sync: new Date().toISOString(),
+      status: 'connected',
       last_error_code: null,
       error_count: 0,
     })
     .eq('id', plaidItemDbId);
 
   if (updateError) {
-    logger.error('Failed to update plaid_item cursor', {
+    // The rows are stored but the cursor is not. Failing loudly is correct:
+    // a silent miss here would re-deliver this page next run, and the caller
+    // needs to record the failure rather than report a clean sync.
+    logger.error('Failed to commit plaid_item cursor after successful ingest', {
       plaid_item_id: plaidItemDbId,
       error_message: updateError.message,
     });
+    throw new Error(
+      `Ingest succeeded but cursor commit failed for plaid_item ${plaidItemDbId}: ${updateError.message}`
+    );
   }
 
   // 6. Refresh account balances via /accounts/balance/get so the stored
@@ -201,10 +231,12 @@ export async function syncTransactionsForItem(
     entityType: 'plaid_item',
     entityId: plaidItemDbId,
     details: {
+      // Rows actually written, not the size of the page Plaid returned.
       added: totalAdded,
       modified: totalModified,
       removed: totalRemoved,
       cursor_updated: true,
+      accounts_created: createdAccountIds.length,
     },
   });
 
@@ -220,49 +252,89 @@ export async function syncTransactionsForItem(
     modified: totalModified,
     removed: totalRemoved,
     cursor,
+    createdAccounts: createdAccountIds,
   };
 }
 
 /**
  * Upsert transactions from Plaid into the transactions table.
  * Uses plaid_transaction_id as the unique key for conflict resolution.
+ *
+ * Returns the number of rows actually written. Callers accumulate that rather
+ * than the length of Plaid's array, so a sync can no longer report `added: 254`
+ * while storing nothing.
+ *
+ * Throws UnknownAccountError if any transaction references a plaid_account_id
+ * that is neither mapped nor deliberately soft-deleted. By this point
+ * `refreshAccountsForItem` has already reconciled with Plaid, so an unmapped id
+ * means something we genuinely do not understand — and dropping it would lose
+ * the transaction for good once the cursor advances past its page.
+ *
+ * Transactions for a soft-deleted account are skipped without error: that row
+ * was removed on purpose, so excluding its data is the intended behaviour and
+ * must not fail the whole item's sync.
  */
 async function upsertTransactions(
   supabase: SupabaseClient,
   transactions: PlaidTransaction[],
   userId: string,
   entityId: string,
-  accountMap: Map<string, string>
-): Promise<void> {
-  const rows = transactions
-    .map((txn) => {
-      const accountId = accountMap.get(txn.account_id);
-      if (!accountId) {
-        logger.warn('Unknown account_id in transaction, skipping', {
-          plaid_account_id: txn.account_id,
-          plaid_transaction_id: txn.transaction_id,
-        });
-        return null;
+  accountMap: Map<string, string>,
+  plaidItemDbId: string,
+  deletedAccountIds: Set<string>
+): Promise<number> {
+  const unknownAccountIds = new Set<string>();
+  const rows = [];
+  let skippedDeleted = 0;
+
+  for (const txn of transactions) {
+    const accountId = accountMap.get(txn.account_id);
+    if (!accountId) {
+      if (deletedAccountIds.has(txn.account_id)) {
+        skippedDeleted++;         // intentionally excluded account
+        continue;
       }
+      unknownAccountIds.add(txn.account_id);
+      continue;
+    }
 
-      return {
-        user_id: userId,
-        entity_id: entityId,
-        account_id: accountId,
-        plaid_transaction_id: txn.transaction_id,
-        amount: txn.amount,
-        date: txn.date,
-        merchant_name: txn.merchant_name || txn.name || null,
-        plaid_category: txn.category || null,
-        is_recurring:
-          txn.personal_finance_category?.primary === 'LOAN_PAYMENTS' ||
-          txn.personal_finance_category?.primary === 'RENT_AND_UTILITIES' ||
-          false,
-      };
-    })
-    .filter(Boolean);
+    rows.push({
+      user_id: userId,
+      entity_id: entityId,
+      account_id: accountId,
+      plaid_transaction_id: txn.transaction_id,
+      amount: txn.amount,
+      date: txn.date,
+      merchant_name: txn.merchant_name || txn.name || null,
+      plaid_category: txn.category || null,
+      is_recurring:
+        txn.personal_finance_category?.primary === 'LOAN_PAYMENTS' ||
+        txn.personal_finance_category?.primary === 'RENT_AND_UTILITIES' ||
+        false,
+    });
+  }
 
-  if (rows.length === 0) return;
+  // Abort before writing anything: a partial write followed by a thrown error
+  // would leave the cursor uncommitted anyway, and re-running re-delivers the
+  // whole page, so writing nothing keeps the retry clean.
+  if (unknownAccountIds.size > 0) {
+    const dropped = transactions.length - rows.length - skippedDeleted;
+    logger.error('Plaid returned transactions for unmapped accounts — aborting sync', {
+      plaid_item_id: plaidItemDbId,
+      unknown_account_ids: Array.from(unknownAccountIds),
+      dropped_count: dropped,
+    });
+    throw new UnknownAccountError(plaidItemDbId, Array.from(unknownAccountIds), dropped);
+  }
+
+  if (skippedDeleted > 0) {
+    logger.info('Skipped transactions for soft-deleted accounts', {
+      plaid_item_id: plaidItemDbId,
+      skipped_count: skippedDeleted,
+    });
+  }
+
+  if (rows.length === 0) return 0;
 
   const { error } = await supabase
     .from('transactions')
@@ -278,6 +350,8 @@ async function upsertTransactions(
     });
     throw new Error(`Transaction upsert failed: ${error.message}`);
   }
+
+  return rows.length;
 }
 
 /**
@@ -308,13 +382,25 @@ async function softDeleteTransactions(
 
 /**
  * Record a sync failure on a plaid_item.
- * Increments error_count and marks item as degraded after 5 consecutive failures.
+ *
+ * `errorCode` must be a real Plaid error_code where one exists — use
+ * `extractPlaidError` at the call site rather than passing an invented literal.
+ * The code is what decides the item's fate, so a constant like the old
+ * 'HEAL_SYNC_ERROR' made every failure look identical and left items retrying
+ * a login problem nightly forever.
+ *
+ * Escalation:
+ *   - a code in REAUTH_ERROR_CODES  → `reauth_required` immediately, on the
+ *     first occurrence. These never self-heal, so counting to five first just
+ *     delays the only action that can fix it — asking the user to re-link.
+ *   - otherwise, `degraded` once consecutive failures reach ERROR_THRESHOLD.
  */
 export async function recordSyncFailure(
   supabase: SupabaseClient,
   plaidItemDbId: string,
   userId: string,
-  errorCode: string
+  errorCode: string,
+  errorMessage?: string
 ): Promise<void> {
   const { data: item } = await supabase
     .from('plaid_items')
@@ -330,7 +416,10 @@ export async function recordSyncFailure(
     error_count: newErrorCount,
   };
 
-  if (newErrorCount >= ERROR_THRESHOLD) {
+  const needsReauth = requiresReauth(errorCode);
+  if (needsReauth) {
+    updates.status = 'reauth_required';
+  } else if (newErrorCount >= ERROR_THRESHOLD) {
     updates.status = 'degraded';
   }
 
@@ -344,6 +433,47 @@ export async function recordSyncFailure(
     action: 'PLAID_SYNC_FAILED',
     entityType: 'plaid_item',
     entityId: plaidItemDbId,
-    details: { error_code: errorCode, error_count: newErrorCount },
+    details: {
+      error_code: errorCode,
+      error_count: newErrorCount,
+      error_message: errorMessage ?? null,
+      escalated_to: updates.status ?? null,
+    },
   });
+
+  logger.warn('Recorded Plaid sync failure', {
+    plaid_item_id: plaidItemDbId,
+    error_code: errorCode,
+    error_count: newErrorCount,
+    escalated_to: updates.status ?? null,
+  });
+}
+
+/**
+ * Record a failed sync from a thrown error, resolving the right error code.
+ *
+ * An UnknownAccountError is our own fault rather than Plaid's, so it is
+ * recorded under a local sentinel instead of a Plaid code — it must not
+ * escalate the item to `reauth_required`, because re-linking would not fix it.
+ */
+export async function recordSyncFailureFromError(
+  supabase: SupabaseClient,
+  plaidItemDbId: string,
+  userId: string,
+  error: unknown
+): Promise<string> {
+  if (error instanceof UnknownAccountError) {
+    await recordSyncFailure(
+      supabase,
+      plaidItemDbId,
+      userId,
+      UNMAPPED_ACCOUNT_ERROR_CODE,
+      error.message
+    );
+    return UNMAPPED_ACCOUNT_ERROR_CODE;
+  }
+
+  const { errorCode, errorMessage } = extractPlaidError(error);
+  await recordSyncFailure(supabase, plaidItemDbId, userId, errorCode, errorMessage);
+  return errorCode;
 }

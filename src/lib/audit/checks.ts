@@ -15,6 +15,9 @@ import {
   PLAID_ITEM_STALE_HOURS,
   DUPLICATE_MERCHANT_EXCLUSIONS,
   EXPECTED_ACCOUNT_NAME_FRAGMENTS,
+  SILENT_SYNC_MAX_TXN_AGE_DAYS,
+  SILENT_SYNC_FRESH_SYNC_HOURS,
+  SILENT_SYNC_BALANCE_TOLERANCE_HOURS,
 } from './config';
 import { isClassifiedIncome } from './patterns';
 import { balanceAgeDays, estimateAccountBalance } from './balance';
@@ -32,6 +35,7 @@ import type {
   AuditTitheRow,
   AuditTransaction,
   Finding,
+  Severity,
 } from './types';
 
 const MAX_DETAIL_ROWS = 100;
@@ -293,3 +297,162 @@ export function checkTitheIdempotency(titheRows: AuditTitheRow[]): Finding[] {
 
 /** Convenience used by tests to confirm the budget-month label of a date. */
 export { titheBudgetMonthLabel };
+
+/**
+ * Check G — Silent sync failure: a "successful" sync that ingested nothing.
+ *
+ * Check E asks "did the sync run?". This asks the harder question: "did the
+ * sync actually produce data?". An item can stamp last_successful_sync every
+ * night and still ingest zero rows — that is what `syncTransactionsForItem`
+ * does when Plaid returns transactions for a plaid_account_id that has no
+ * matching `accounts` row: they are dropped with a warning, the cursor still
+ * advances, and the run is recorded as a success.
+ *
+ * An item is reported when BOTH hold:
+ *   1. it claims success — last_successful_sync is within
+ *      SILENT_SYNC_FRESH_SYNC_HOURS (items staler than that are Check E's job,
+ *      so they are not double-reported here); and
+ *   2. the newest transaction across its non-deleted accounts is older than
+ *      SILENT_SYNC_MAX_TXN_AGE_DAYS — or it has no transactions at all.
+ *
+ * Severity is then graded on whether the sync actually touched the account
+ * rows, which is what separates a broken connection from a quiet one:
+ *
+ *   critical — the newest accounts.updated_at lags last_successful_sync by more
+ *     than SILENT_SYNC_BALANCE_TOLERANCE_HOURS. The run never wrote an account,
+ *     so its "success" is not backed by any ingested data at all.
+ *   warn — balances were refreshed on the same run, so the sync demonstrably
+ *     reached the institution and Plaid simply had nothing new. Normal for a
+ *     savings account or an unused card; surfaced for review, not alarm.
+ *
+ * Grading matters: without it this check fires `critical` on every quiet
+ * savings account, and a check that cries wolf is a check that gets ignored —
+ * which is how the original failure went unnoticed for six weeks.
+ *
+ * Items with no accounts rows at all are skipped: there is nothing to compare
+ * against, and Check E's missing-account arm covers that case.
+ */
+export function checkSilentSyncFailure(
+  plaidItems: AuditPlaidItem[],
+  accounts: AuditAccount[],
+  transactions: AuditTransaction[],
+  now: Date = new Date(),
+  maxTxnAgeDays: number = SILENT_SYNC_MAX_TXN_AGE_DAYS,
+  freshSyncHours: number = SILENT_SYNC_FRESH_SYNC_HOURS,
+  balanceToleranceHours: number = SILENT_SYNC_BALANCE_TOLERANCE_HOURS
+): Finding[] {
+  // Newest transaction date per account, as a plain YYYY-MM-DD string compare
+  // (transactions.date is a DATE column, so lexical order is chronological).
+  const newestByAccount = new Map<string, string>();
+  for (const t of transactions) {
+    const current = newestByAccount.get(t.account_id);
+    if (current === undefined || t.date > current) {
+      newestByAccount.set(t.account_id, t.date);
+    }
+  }
+
+  const accountsByItem = new Map<string, AuditAccount[]>();
+  for (const a of accounts) {
+    if (!a.plaid_item_id) continue;
+    const list = accountsByItem.get(a.plaid_item_id) ?? [];
+    list.push(a);
+    accountsByItem.set(a.plaid_item_id, list);
+  }
+
+  const freshMs = freshSyncHours * 3_600_000;
+  const toleranceMs = balanceToleranceHours * 3_600_000;
+
+  interface Row extends Record<string, unknown> {
+    daysSinceNewestTransaction: number | null;
+    balancesStale: boolean;
+  }
+  const rows: Row[] = [];
+
+  for (const item of plaidItems) {
+    // 1. Must be claiming a recent success.
+    if (!item.last_successful_sync) continue;
+    const syncMs = new Date(item.last_successful_sync).getTime();
+    if (now.getTime() - syncMs > freshMs) continue; // stale — Check E owns this one
+
+    const itemAccounts = accountsByItem.get(item.id) ?? [];
+    if (itemAccounts.length === 0) continue; // nothing to measure
+
+    // 2. Newest transaction across every account on the item.
+    let newest: string | null = null;
+    for (const a of itemAccounts) {
+      const d = newestByAccount.get(a.id);
+      if (d !== undefined && (newest === null || d > newest)) newest = d;
+    }
+
+    const txnAgeDays =
+      newest === null
+        ? null
+        : Math.floor((now.getTime() - new Date(`${newest}T00:00:00Z`).getTime()) / 86_400_000);
+
+    if (txnAgeDays !== null && txnAgeDays <= maxTxnAgeDays) continue; // healthy
+
+    // 3. Did the run actually write an account row? Balances are persisted from
+    //    the same response the transactions come from, so a snapshot that lags
+    //    the claimed sync means the sync never reached these accounts.
+    let newestBalanceMs = -Infinity;
+    for (const a of itemAccounts) {
+      const t = new Date(a.updated_at).getTime();
+      if (!Number.isNaN(t) && t > newestBalanceMs) newestBalanceMs = t;
+    }
+    const balancesStale =
+      newestBalanceMs === -Infinity || syncMs - newestBalanceMs > toleranceMs;
+
+    rows.push({
+      institution: item.institution_name ?? 'Unknown institution',
+      plaidItemId: item.id,
+      status: item.status,
+      lastSuccessfulSync: item.last_successful_sync,
+      newestTransaction: newest,
+      daysSinceNewestTransaction: txnAgeDays,
+      balancesStale,
+      balanceLagHours:
+        newestBalanceMs === -Infinity
+          ? null
+          : Math.max(0, Math.round((syncMs - newestBalanceMs) / 3_600_000)),
+      diagnosis: balancesStale
+        ? 'Sync reported success without writing any account row — transactions are being dropped (likely an unmapped plaid_account_id).'
+        : 'Sync reached the institution and refreshed balances; Plaid returned no new transactions. Likely a genuinely quiet account.',
+      accounts: itemAccounts.map((a) => a.name),
+    });
+  }
+
+  if (rows.length === 0) return [];
+
+  // Proven failures first; then never-ingested, then oldest data first.
+  rows.sort((a, b) => {
+    if (a.balancesStale !== b.balancesStale) return a.balancesStale ? -1 : 1;
+    const aDays = a.daysSinceNewestTransaction;
+    const bDays = b.daysSinceNewestTransaction;
+    if (aDays === null) return bDays === null ? 0 : -1;
+    if (bDays === null) return 1;
+    return bDays - aDays;
+  });
+
+  const broken = rows.filter((r) => r.balancesStale);
+  const severity: Severity = broken.length > 0 ? 'critical' : 'warn';
+  const title =
+    broken.length > 0
+      ? 'Sync reports success but is ingesting nothing'
+      : 'No new transactions since last successful sync';
+
+  return [{
+    checkKey: 'silent_sync_failure',
+    severity,
+    title,
+    detail: {
+      rows: rows.slice(0, MAX_DETAIL_ROWS),
+      truncated: rows.length > MAX_DETAIL_ROWS,
+      thresholdDays: maxTxnAgeDays,
+      confirmedFailures: broken.length,
+      quietAccounts: rows.length - broken.length,
+    },
+    itemCount: rows.length,
+    totalAmount: 0,
+    period: null,
+  }];
+}

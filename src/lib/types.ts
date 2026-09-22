@@ -176,7 +176,11 @@ export type AuditAction =
   | 'AUTH_MFA_VERIFIED'
   | 'PLAID_ITEM_LINKED'
   | 'PLAID_ITEM_REAUTH'
+  /** An item's credentials were repaired — via our relink flow or LOGIN_REPAIRED. */
+  | 'PLAID_ITEM_RELINKED'
   | 'PLAID_ITEM_ERROR'
+  /** Accounts appeared on an existing item (relink selection, NEW_ACCOUNTS_AVAILABLE). */
+  | 'PLAID_ACCOUNTS_DISCOVERED'
   | 'PLAID_SYNC_COMPLETED'
   | 'PLAID_SYNC_FAILED'
   | 'WEBHOOK_RECEIVED'

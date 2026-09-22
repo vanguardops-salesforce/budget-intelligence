@@ -14,7 +14,8 @@ export type CheckKey =
   | 'stale_balances'
   | 'duplicate_transactions'
   | 'plaid_item_health'
-  | 'tithe_idempotency';
+  | 'tithe_idempotency'
+  | 'silent_sync_failure';
 
 /** A single issue surfaced by a check. */
 export interface Finding {

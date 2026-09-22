@@ -17,6 +17,7 @@ import {
   checkDuplicateTransactions,
   checkPlaidItemHealth,
   checkTitheIdempotency,
+  checkSilentSyncFailure,
 } from './checks';
 import { reconcileActionItems } from './actionItems';
 import type {
@@ -154,6 +155,7 @@ export async function runDataHealthAudit(
       ...checkStaleBalances(accounts, transactions, now),
       ...checkDuplicateTransactions(transactions, accounts),
       ...checkPlaidItemHealth(plaidItems, accounts, undefined, now),
+      ...checkSilentSyncFailure(plaidItems, accounts, transactions, now),
       ...checkTitheIdempotency(titheRows),
     ];
 

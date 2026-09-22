@@ -20,6 +20,27 @@ export const STALE_BALANCE_MAX_AGE_DAYS = 3;
 export const PLAID_ITEM_STALE_HOURS = 36;
 
 /**
+ * Check G — silent sync failure ("green light, no data").
+ *
+ * An item whose last_successful_sync is recent is *claiming* health. If its
+ * accounts have nevertheless received no new transaction in more than this many
+ * days, the sync is reporting success while ingesting nothing — the exact
+ * failure mode that let Capital One item ccffe6d8 drop 254 transactions on
+ * 2026-09-22 while showing a green "synced today".
+ *
+ * 5 days is deliberately wider than a long holiday weekend, so a genuinely
+ * quiet card does not trip the check.
+ */
+export const SILENT_SYNC_MAX_TXN_AGE_DAYS = 5;
+
+/**
+ * Check G — how recent last_successful_sync must be for an item to count as
+ * "claiming success". Items staler than this are already reported by Check E,
+ * so they are excluded here to avoid double-reporting the same connection.
+ */
+export const SILENT_SYNC_FRESH_SYNC_HOURS = 36;
+
+/**
  * Check D — known-legitimate repeated charges to exclude from duplicate
  * detection. Matched as a case-insensitive substring against merchant_name.
  *   - Delta: multiple airline tickets purchased same day at the same price.

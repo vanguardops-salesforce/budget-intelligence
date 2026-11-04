@@ -7,7 +7,8 @@
 --
 -- Item:  18dedaa2-37f4-4f80-94f8-84f87e754437
 --        American Express — "Business Platinum Card®" ····1003
--- State: status 'degraded', last_error_code 'HEAL_SYNC_ERROR', error_count 39,
+-- State: status 'degraded', last_error_code 'HEAL_SYNC_ERROR', error_count 82
+--        (as of 2026-11-04; it rises by one per nightly sweep),
 --        failing daily since 2026-08-14, transactions end 2026-08-10.
 --
 -- Why by hand: 'HEAL_SYNC_ERROR' is an invented literal that carries no
@@ -26,7 +27,7 @@ SELECT id, institution_name, status, last_error_code, error_count,
        last_successful_sync
 FROM plaid_items
 WHERE id = '18dedaa2-37f4-4f80-94f8-84f87e754437';
--- Expect: degraded / HEAL_SYNC_ERROR / 39 / 2026-08-14
+-- Expect: degraded / HEAL_SYNC_ERROR / 82 or higher / 2026-08-14
 
 -- ── Apply ───────────────────────────────────────────────────────────────────
 BEGIN;
@@ -51,5 +52,6 @@ COMMIT;
 -- handler resets status, upserts any newly selected accounts, and requeues
 -- webhook events that were failed while the item was in reauth.
 --
--- NOTE: error_count is deliberately left at 39 as a record of the loop. The
+-- NOTE: error_count is deliberately left as is (82 at 2026-11-04) as a
+-- record of the loop. The
 -- relink handler resets it to 0 on success.

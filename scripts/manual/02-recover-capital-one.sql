@@ -25,7 +25,9 @@
 --
 -- ⚠️  PRECONDITIONS for §B onward:
 --     1. scripts/manual/00-hold-capital-one.sql has been run (item parked), AND
---     2. the fix is deployed (PR #18 merged), AND
+--     2. migration 007 (upsert_plaid_transactions) is applied AND the fix is
+--        deployed (PR #18 merged) — without 007 the replay in §C resets
+--        is_recurring and entity_id on every existing row, AND
 --     3. scripts/probe-transaction-ids.ts says ids are STABLE — see §E first
 --        if it says REISSUED.
 -- ============================================================================
@@ -212,17 +214,61 @@ GROUP BY a.id, a.name, a.mask, a.plaid_account_id, a.entity_id;
 -- txn_count around 693 + the recovered rows. A number near 1386 means the
 -- history was duplicated — go straight to §E.
 
--- D3. Categorisation must have survived. 643 of the original 693 rows carry a
---     user_category_id and 248 a recurring_pattern_id; those counts must not
---     drop. (They can rise as rules are applied to recovered rows.)
-SELECT COUNT(*)                                              AS total,
-       COUNT(*) FILTER (WHERE user_category_id IS NOT NULL)  AS categorized,
-       COUNT(*) FILTER (WHERE recurring_pattern_id IS NOT NULL) AS recurring_linked,
-       COUNT(*) FILTER (WHERE notes IS NOT NULL)             AS with_notes
+-- D3. User-owned state must have survived the replay.
+--
+--     Before migration 007 the replay would have reset is_recurring to
+--     Plaid's LOAN_PAYMENTS / RENT_AND_UTILITIES rule (wiping subscription
+--     flags set by recurring detection) and entity_id to the item default
+--     (undoing per-transaction reassignment). 007's upsert_plaid_transactions
+--     no longer touches either on conflict; this is the check that it held.
+--
+--     Baseline taken on production 2026-11-04, Venture X, 693 rows. Every
+--     count may RISE (rules and detection run on recovered rows) but must
+--     NOT fall, except the reassigned-entity count, which must stay exactly 1.
+--
+--       categorized       >= 643   (user_category_id IS NOT NULL)
+--       recurring_linked  >= 281   (recurring_pattern_id IS NOT NULL)
+--       with_notes        >= 2
+--       is_recurring      >= 303   (256 of these have no plaid_category, i.e.
+--                                   app-detected, not Plaid's rule)
+--       on entity 22222222-2222-2222-2222-222222222222  = 1 exactly
+SELECT
+  COUNT(*)                                                     AS total,
+  COUNT(*) FILTER (WHERE user_category_id IS NOT NULL)         AS categorized,
+  COUNT(*) FILTER (WHERE recurring_pattern_id IS NOT NULL)     AS recurring_linked,
+  COUNT(*) FILTER (WHERE notes IS NOT NULL)                    AS with_notes,
+  COUNT(*) FILTER (WHERE is_recurring)                         AS is_recurring,
+  COUNT(*) FILTER (WHERE entity_id = '22222222-2222-2222-2222-222222222222')
+                                                               AS on_reassigned_entity
 FROM transactions
 WHERE account_id = '3fc1ca01-e89e-4d09-bbd0-3ef6bec4d3b5'
   AND deleted_at IS NULL;
--- Expect: categorized >= 643, recurring_linked >= 248, with_notes >= 2.
+
+-- D3 verdict — one row per check. Any FAIL means user-owned state was
+-- overwritten: STOP, do not proceed to §E, and check that migration 007 is
+-- applied (SELECT to_regprocedure('public.upsert_plaid_transactions(jsonb)');
+-- must be non-null) and that the deployed code calls the RPC.
+WITH c AS (
+  SELECT
+    COUNT(*) FILTER (WHERE user_category_id IS NOT NULL)     AS categorized,
+    COUNT(*) FILTER (WHERE recurring_pattern_id IS NOT NULL) AS recurring_linked,
+    COUNT(*) FILTER (WHERE notes IS NOT NULL)                AS with_notes,
+    COUNT(*) FILTER (WHERE is_recurring)                     AS is_recurring,
+    COUNT(*) FILTER (WHERE entity_id = '22222222-2222-2222-2222-222222222222')
+                                                             AS on_reassigned_entity
+  FROM transactions
+  WHERE account_id = '3fc1ca01-e89e-4d09-bbd0-3ef6bec4d3b5'
+    AND deleted_at IS NULL
+)
+SELECT check_name, actual, expected,
+       CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS verdict
+FROM c, LATERAL (VALUES
+  ('categorized',          categorized,          '>= 643', categorized          >= 643),
+  ('recurring_linked',     recurring_linked,     '>= 281', recurring_linked     >= 281),
+  ('with_notes',           with_notes,           '>= 2',   with_notes           >= 2),
+  ('is_recurring',         is_recurring,         '>= 303', is_recurring         >= 303),
+  ('on_reassigned_entity', on_reassigned_entity, '= 1',    on_reassigned_entity  = 1)
+) AS v(check_name, actual, expected, ok);
 
 
 -- ════════════════════════════════════════════════════════════════════════════

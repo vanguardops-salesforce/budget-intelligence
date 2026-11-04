@@ -336,12 +336,15 @@ async function upsertTransactions(
 
   if (rows.length === 0) return 0;
 
-  const { error } = await supabase
-    .from('transactions')
-    .upsert(rows, {
-      onConflict: 'plaid_transaction_id',
-      ignoreDuplicates: false,
-    });
+  // Not `.from('transactions').upsert(...)`: PostgREST's upsert rewrites every
+  // column in the payload on conflict, which reset entity_id and is_recurring
+  // on existing rows — undoing per-transaction entity reassignment and wiping
+  // recurring flags set by the app's own detection. The RPC (migration 007)
+  // inserts new rows in full but, on conflict, updates only the Plaid-owned
+  // columns: amount, date, merchant_name, plaid_category, account_id.
+  const { data: written, error } = await supabase.rpc('upsert_plaid_transactions', {
+    p_rows: rows,
+  });
 
   if (error) {
     logger.error('Failed to upsert transactions', {
@@ -351,7 +354,24 @@ async function upsertTransactions(
     throw new Error(`Transaction upsert failed: ${error.message}`);
   }
 
-  return rows.length;
+  // The function returns inserted + updated, i.e. rows actually written. A
+  // missing count is an error, not zero: Number(null) is 0, which would
+  // quietly report an empty write.
+  const count = written === null || written === undefined ? NaN : Number(written);
+  if (!Number.isFinite(count)) {
+    throw new Error(
+      `Transaction upsert returned no row count for plaid_item ${plaidItemDbId}`
+    );
+  }
+  if (count !== rows.length) {
+    logger.warn('Transaction upsert wrote a different number of rows than sent', {
+      plaid_item_id: plaidItemDbId,
+      sent: rows.length,
+      written: count,
+    });
+  }
+
+  return count;
 }
 
 /**

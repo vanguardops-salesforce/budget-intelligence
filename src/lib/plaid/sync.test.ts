@@ -24,10 +24,14 @@ const ITEM_ID = 'ccffe6d8-3b5c-4da5-a02b-c166359b436e';
 const USER_ID = 'user-1';
 const ENTITY_ID = 'entity-1';
 
-/** Records every write so assertions can check what did and did not happen. */
+/**
+ * Records every write so assertions can check what did and did not happen.
+ * Transaction writes go through the upsert_plaid_transactions RPC and are
+ * recorded as table 'transactions', op 'rpc'.
+ */
 interface Recorded {
   table: string;
-  op: 'upsert' | 'update';
+  op: 'upsert' | 'update' | 'rpc';
   payload: unknown;
 }
 
@@ -59,7 +63,14 @@ function makeSupabase(recorded: Recorded[]) {
 
   return {
     from: (table: string) => builder(table),
-    rpc: () => Promise.resolve({ data: 'encrypted-token', error: null }),
+    rpc: (fn: string, args: { p_rows?: unknown[] }) => {
+      if (fn === 'upsert_plaid_transactions') {
+        recorded.push({ table: 'transactions', op: 'rpc', payload: args.p_rows });
+        // Like the real function: inserted + updated, one per row sent.
+        return Promise.resolve({ data: args.p_rows?.length ?? 0, error: null });
+      }
+      return Promise.resolve({ data: 'encrypted-token', error: null });
+    },
   } as never;
 }
 
@@ -167,6 +178,108 @@ describe('syncTransactionsForItem', () => {
         }
       );
       expect.assertions(3);
+    });
+  });
+
+  describe('transaction writes go through upsert_plaid_transactions', () => {
+    it('calls the RPC with the mapped rows and never PostgREST upsert', async () => {
+      const recorded: Recorded[] = [];
+      transactionsSync.mockResolvedValue(
+        syncPage({ added: [plaidTxn('t1', 'known-acct'), plaidTxn('t2', 'known-acct')] })
+      );
+
+      await syncTransactionsForItem(makeSupabase(recorded), ITEM_ID, USER_ID, ENTITY_ID);
+
+      // .from('transactions').upsert() rewrites every column on conflict,
+      // which is what reset entity_id and is_recurring. It must never be used.
+      expect(recorded.some((r) => r.table === 'transactions' && r.op === 'upsert')).toBe(false);
+
+      const rpcCalls = recorded.filter((r) => r.table === 'transactions' && r.op === 'rpc');
+      expect(rpcCalls).toHaveLength(1);
+      expect(rpcCalls[0].payload).toEqual([
+        expect.objectContaining({
+          user_id: USER_ID,
+          entity_id: ENTITY_ID,
+          account_id: 'db-acct-uuid',
+          plaid_transaction_id: 't1',
+          amount: 12.34,
+          date: '2026-09-20',
+          merchant_name: 'Merchant',
+          plaid_category: null,
+          is_recurring: false,
+        }),
+        expect.objectContaining({ plaid_transaction_id: 't2', account_id: 'db-acct-uuid' }),
+      ]);
+    });
+
+    it('sends added and modified pages as separate RPC calls', async () => {
+      const recorded: Recorded[] = [];
+      transactionsSync.mockResolvedValue(
+        syncPage({
+          added: [plaidTxn('t1', 'known-acct')],
+          modified: [plaidTxn('t2', 'known-acct')],
+        })
+      );
+
+      await syncTransactionsForItem(makeSupabase(recorded), ITEM_ID, USER_ID, ENTITY_ID);
+
+      expect(recorded.filter((r) => r.op === 'rpc')).toHaveLength(2);
+    });
+
+    it('returns the count the RPC reports as written', async () => {
+      transactionsSync.mockResolvedValue(
+        syncPage({ added: [plaidTxn('t1', 'known-acct'), plaidTxn('t2', 'known-acct')] })
+      );
+      const supabase = makeSupabase([]) as unknown as {
+        rpc: (fn: string, args: unknown) => Promise<unknown>;
+      };
+      const realRpc = supabase.rpc;
+      supabase.rpc = (fn: string, args: unknown) =>
+        fn === 'upsert_plaid_transactions'
+          ? Promise.resolve({ data: 1, error: null })
+          : realRpc(fn, args);
+
+      const result = await syncTransactionsForItem(
+        supabase as never, ITEM_ID, USER_ID, ENTITY_ID
+      );
+
+      expect(result.added).toBe(1);
+    });
+
+    it('treats a missing row count as a failure, not as zero rows', async () => {
+      const recorded: Recorded[] = [];
+      transactionsSync.mockResolvedValue(syncPage({ added: [plaidTxn('t1', 'known-acct')] }));
+      const supabase = makeSupabase(recorded) as unknown as {
+        rpc: (fn: string, args: unknown) => Promise<unknown>;
+      };
+      const realRpc = supabase.rpc;
+      supabase.rpc = (fn: string, args: unknown) =>
+        fn === 'upsert_plaid_transactions'
+          ? Promise.resolve({ data: null, error: null })
+          : realRpc(fn, args);
+
+      await expect(
+        syncTransactionsForItem(supabase as never, ITEM_ID, USER_ID, ENTITY_ID)
+      ).rejects.toThrow('returned no row count');
+      expect(recorded.filter((r) => r.table === 'plaid_items')).toHaveLength(0);
+    });
+
+    it('throws, and does not commit the cursor, when the RPC fails', async () => {
+      const recorded: Recorded[] = [];
+      transactionsSync.mockResolvedValue(syncPage({ added: [plaidTxn('t1', 'known-acct')] }));
+      const supabase = makeSupabase(recorded) as unknown as {
+        rpc: (fn: string, args: unknown) => Promise<unknown>;
+      };
+      const realRpc = supabase.rpc;
+      supabase.rpc = (fn: string, args: unknown) =>
+        fn === 'upsert_plaid_transactions'
+          ? Promise.resolve({ data: null, error: { message: 'boom' } })
+          : realRpc(fn, args);
+
+      await expect(
+        syncTransactionsForItem(supabase as never, ITEM_ID, USER_ID, ENTITY_ID)
+      ).rejects.toThrow('Transaction upsert failed: boom');
+      expect(recorded.filter((r) => r.table === 'plaid_items')).toHaveLength(0);
     });
   });
 

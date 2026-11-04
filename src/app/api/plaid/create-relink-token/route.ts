@@ -70,7 +70,13 @@ export async function POST(request: Request) {
     const plaidClient = getPlaidClient();
     const webhookUrl = `${publicEnv.NEXT_PUBLIC_APP_URL}/api/plaid/webhook`;
 
-    // Create link token in update mode with the existing access token
+    // Create link token in update mode with the existing access token.
+    //
+    // account_selection_enabled surfaces Plaid's account picker during the
+    // update flow. Without it the user re-authenticates but is never offered
+    // the account list, so a card that was not part of the original consent
+    // can never be added — which is why a relink could "succeed" and still
+    // leave a new card missing entirely.
     const response = await plaidClient.linkTokenCreate({
       user: { client_user_id: user.id },
       client_name: 'Budget Intelligence',
@@ -78,6 +84,7 @@ export async function POST(request: Request) {
       language: 'en',
       webhook: webhookUrl,
       access_token: accessToken,
+      update: { account_selection_enabled: true },
     });
 
     await writeAuditLog(serviceClient, {
